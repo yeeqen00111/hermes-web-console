@@ -35,6 +35,7 @@ export default function ModelConfigs() {
   const [validateResult, setValidateResult] = useState(null);
   const [expanded, setExpanded] = useState({});   // {endpoint_id: bool}
   const [modelFilter, setModelFilter] = useState("");
+  const [showHidden, setShowHidden] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);       // {type:'ok'|'err', msg}
   const [modal, setModal] = useState(null);       // {type:'confirm', vendor, model} | {type:'result', ok, msg}
@@ -179,23 +180,39 @@ export default function ModelConfigs() {
   }
 
   // 删除：弹框确认 → 执行 → 弹框反馈（用户定案的交互）
-  function askDeleteModel(c, m) {
+  function askHideModel(c, m) {
     setModal({ type: "confirm", vendor: c, model: m });
   }
 
-  async function handleDeleteModel() {
+  async function handleHideModel() {
     const { vendor, model } = modal;
     setBusy(true);
     try {
       const r = await api(
-        `/api/model-configs/${encodeURIComponent(vendor.id)}/models/${encodeURIComponent(model)}`,
-        { method: "DELETE" });
+        `/api/model-configs/${encodeURIComponent(vendor.id)}/models/${encodeURIComponent(model)}/hide`,
+        { method: "POST" });
       const d = await r.json().catch(() => ({}));
       const ok = r.ok;
-      setModal({ type: "result", ok, msg: ok ? `已从「${vendor.name}」删除模型：${model}` : (d.detail ?? `HTTP ${r.status}`) });
+      setModal({ type: "result", ok, msg: ok ? `已隐藏模型：${model}` : (d.detail ?? `HTTP ${r.status}`) });
       if (ok) await load(true);   // 写操作后强制破 picker 缓存刷新
     } catch (e) {
-      setModal({ type: "result", ok: false, msg: "删除失败：" + e.message });
+      setModal({ type: "result", ok: false, msg: "操作失败：" + e.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUnhideModel(c, m) {
+    setBusy(true);
+    try {
+      const r = await api(
+        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(m)}/unhide`,
+        { method: "POST" });
+      if (!r.ok) { showToast("err", `恢复失败 HTTP ${r.status}`); return; }
+      showToast("ok", `已恢复显示：${m}`);
+      await load(true);
+    } catch (e) {
+      showToast("err", "恢复失败：" + e.message);
     } finally {
       setBusy(false);
     }
@@ -319,22 +336,22 @@ export default function ModelConfigs() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             {modal.type === "confirm" ? (
               <>
-                <h3>删除模型</h3>
+                <h3>隐藏模型</h3>
                 <p>
-                  确定从「{modal.vendor.name}」删除模型<br />
+                  确定隐藏「{modal.vendor.name}」的模型<br />
                   <b className="mono">{modal.model}</b> 吗？
                 </p>
-                <p className="hint">删除后该厂商的清单里将不再包含此模型。</p>
+                <p className="hint">隐藏后不再出现在可选列表中（可随时恢复），不影响 Hermes 配置。</p>
                 <div className="modal-actions">
                   <button className="ghost" onClick={() => setModal(null)} disabled={busy}>取消</button>
-                  <button className="danger-solid" onClick={handleDeleteModel} disabled={busy}>
-                    {busy ? "删除中…" : "确认删除"}
+                  <button className="danger-solid" onClick={handleHideModel} disabled={busy}>
+                    {busy ? "处理中…" : "确认隐藏"}
                   </button>
                 </div>
               </>
             ) : (
               <>
-                <h3>{modal.ok ? "✅ 删除成功" : "❌ 删除失败"}</h3>
+                <h3>{modal.ok ? "✅ 已隐藏" : "❌ 操作失败"}</h3>
                 <p className={modal.ok ? "ok-line" : "error"}>{modal.msg}</p>
                 <div className="modal-actions">
                   <button onClick={() => setModal(null)}>好的</button>
@@ -366,6 +383,9 @@ export default function ModelConfigs() {
           {configs.map((c) => {
             const open = !!expanded[c.id];
             const models = c.models ?? [];
+            const hiddenSet = new Set(c.hidden_models ?? []);
+            // 默认视图：只显示未隐藏的；勾选「显示已隐藏」后全部显示（隐藏的置灰）
+            const visibleModels = models.filter((m) => showHidden || !hiddenSet.has(m));
             return (
               <div className="vendor" key={c.id}>
                 <div className="vendor-row" onClick={() => toggleExpand(c.id)}>
@@ -407,8 +427,16 @@ export default function ModelConfigs() {
                             onChange={(e) => setModelFilter(e.target.value)}
                           />
                           <span className="hint">
-                            {models.filter((m) => m.toLowerCase().includes(modelFilter.toLowerCase())).length} / {models.length} 个模型
+                            {visibleModels.length} / {models.length} 个模型
                           </span>
+                          <label className="chk">
+                            <input
+                              type="checkbox"
+                              checked={showHidden}
+                              onChange={(e) => setShowHidden(e.target.checked)}
+                            />
+                            显示已隐藏
+                          </label>
                         </div>
                         <div className="vm-table-wrap">
                           <table className="vm-table">
@@ -420,8 +448,7 @@ export default function ModelConfigs() {
                               </tr>
                             </thead>
                             <tbody>
-                              {models
-                                .filter((m) => m.toLowerCase().includes(modelFilter.toLowerCase()))
+                              {visibleModels
                                 .sort((a, b) => {
                                   const aDef = isDefaultModel(c, a), bDef = isDefaultModel(c, b);
                                   if (aDef !== bDef) return aDef ? -1 : 1;   // 默认置顶
@@ -429,23 +456,32 @@ export default function ModelConfigs() {
                                 })
                                 .map((m) => {
                                   const isDefault = isDefaultModel(c, m);
+                                  const isHidden = (c.hidden_models ?? []).includes(m);
                                   return (
-                                    <tr key={m}>
+                                    <tr key={m} className={isHidden ? "row-hidden" : ""}>
                                       <td className="mono">{m}</td>
                                       <td>
                                         {isDefault
                                           ? <span className="pill pill-on">● 当前默认</span>
-                                          : <span className="pill">可切换</span>}
+                                          : isHidden
+                                            ? <span className="pill">已隐藏</span>
+                                            : <span className="pill">可切换</span>}
                                       </td>
                                       <td className="ops">
-                                        {!isDefault && (
+                                        {!isDefault && !isHidden && (
                                           <button className="link" onClick={() => handleSwitchModel(c, m)} disabled={busy}>
                                             设默认
                                           </button>
                                         )}
-                                        <button className="link danger" onClick={() => askDeleteModel(c, m)} disabled={busy}>
-                                          删除
-                                        </button>
+                                        {isHidden ? (
+                                          <button className="link" onClick={() => handleUnhideModel(c, m)} disabled={busy}>
+                                            取消隐藏
+                                          </button>
+                                        ) : (
+                                          <button className="link danger" onClick={() => askHideModel(c, m)} disabled={busy || isDefault}>
+                                            隐藏
+                                          </button>
+                                        )}
                                       </td>
                                     </tr>
                                   );

@@ -17,6 +17,9 @@ from config import hc, require_app_token
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+import hidden_store
+from hidden_store import hide_model as _hide, unhide_model as _unhide
+
 router = APIRouter(prefix="/api/model-configs", tags=["model-configs"])
 
 
@@ -122,12 +125,14 @@ def list_model_configs(refresh: bool = False):
             continue
         ep = next((e for e in ep_list
                    if e.get("base_url") and host(e["base_url"]) and host(e["base_url"]) in slug), None)
+        hidden = sorted(hidden_store.hidden_set(slug))
         configs.append({
             "id": slug,                                    # 切换/设默认用（model/set 认 picker slug）
             "manage_id": (ep or {}).get("id"),             # 编辑/删除用（custom-endpoints 体系；可能缺）
             "name": p.get("name") or slug,
             "base_url": (ep or {}).get("base_url") or str(p.get("api_url") or ""),
             "models": p.get("models") or [],
+            "hidden_models": hidden,                       # 展示层隐藏清单（SQLite）
             "model": (ep or {}).get("model") or (p.get("models") or [""])[0],
             "has_api_key": (ep or {}).get("has_api_key"),
             "api_key_preview": (ep or {}).get("api_key_preview"),
@@ -238,6 +243,20 @@ def set_default_model(vendor_id: str, model: str):
         return {"ok": False, "confirm_required": True,
                 "confirm_message": data.get("confirm_message", "")}
     return {"ok": True}
+
+
+@router.post("/{vendor_id}/models/{model_id}/hide", dependencies=[Depends(require_app_token)])
+def hide_vendor_model(vendor_id: str, model_id: str):
+    """从可选列表隐藏一个模型（SQLite 展示层配置；Hermes config 不动）。"""
+    _hide(vendor_id, model_id)
+    return {"ok": True, "hidden": True}
+
+
+@router.post("/{vendor_id}/models/{model_id}/unhide", dependencies=[Depends(require_app_token)])
+def unhide_vendor_model(vendor_id: str, model_id: str):
+    """恢复显示一个已隐藏的模型。"""
+    _unhide(vendor_id, model_id)
+    return {"ok": True, "hidden": False}
 
 
 @router.delete("/{vendor_id}/models/{model_id}", dependencies=[Depends(require_app_token)])
