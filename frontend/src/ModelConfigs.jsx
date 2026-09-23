@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // 模型配置管理页：厂商（自定义端点）→ 模型 两级结构。
 // 删除 = 勾选（支持全选）+ 批量删除，底层为 SQLite 隐藏清单（config.yaml 不动，
 // 规避 models_discovered 自动回写）。已删除的模型直接从列表消失。
-// 模型条目字段：模型ID（厂商真名）/ 显示名称（展示用）/ 最高token / 思考等级。
+// 手动添加的模型（含显示名称/最高token/思考等级）存 SQLite custom_models 表。
 const EMPTY_FORM = {
   id: null,
   name: "",
@@ -28,14 +28,14 @@ export default function ModelConfigs() {
   const [configs, setConfigs] = useState([]);
   const [current, setCurrent] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState(null);
+  const [editing, setEditing] = useState(null);          // null=列表, config=编辑, {} =新增
   const [form, setForm] = useState(EMPTY_FORM);
   const [validateResult, setValidateResult] = useState(null);
-  const [expanded, setExpanded] = useState({});
+  const [expanded, setExpanded] = useState({});          // {vendorSlug: bool}
   const [modelFilter, setModelFilter] = useState("");
-  const [checked, setChecked] = useState(new Set());   // "vendor::model" 勾选集合
-  const [renaming, setRenaming] = useState(null);      // {vendorId, old, value}
-  const [modal, setModal] = useState(null);            // {title, msg, confirmText, onConfirm}
+  const [checked, setChecked] = useState(new Set());     // "vendor::model" 勾选集合
+  const [renaming, setRenaming] = useState(null);        // {vendorId, old, value} 行内改名
+  const [modal, setModal] = useState(null);              // {title, msg, confirmText, onConfirm}
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
@@ -174,6 +174,24 @@ export default function ModelConfigs() {
     }
   }
 
+  // 单行删除（走 SQLite 隐藏，可恢复）
+  async function handleHideModel(c, m) {
+    setBusy(true);
+    try {
+      const r = await api(
+        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(m)}/hide`,
+        { method: "POST" });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast("err", `删除失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
+      showToast("ok", `已删除：${m}`);
+      await load(true);
+    } catch (e) {
+      showToast("err", "删除失败：" + e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // ── 行内改名（编辑模型 ID）──
 
   async function handleRenameConfirm(c) {
@@ -194,88 +212,11 @@ export default function ModelConfigs() {
     }
   }
 
-  const set = (k) => (e) =>
-    setForm((f) => ({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
-
-  // ── 表单视图 ──
-  if (editing) {
-    const isEdit = !!form.id;
-    return (
-      <div className="page">
-        {toast && <div className={`toast ${toast.type}`}>{toast.msg}</div>}
-        <header>
-          <h1>{isEdit ? "编辑模型配置" : "新增模型配置"}</h1>
-          <button className="ghost" onClick={() => setEditing(null)} disabled={busy}>返回列表</button>
-        </header>
-
-        <div className="form">
-          <label>名称 *<input value={form.name} onChange={set("name")} placeholder="如：火山方舟" /></label>
-          <label>Base URL *<input value={form.base_url} onChange={set("base_url")} placeholder="https://…/v3" /></label>
-          <label>端点默认模型 *<input value={form.model} onChange={set("model")} placeholder="如 deepseek-v4-flash" /></label>
-          <label>
-            API Key
-            <input type="password" value={form.api_key} onChange={set("api_key")}
-                   placeholder={editing.has_api_key ? `已存（${editing.api_key_preview}）——留空=不修改` : "未设置"} />
-            {isEdit && editing.has_api_key && (
-              <span className="hint">
-                <input type="checkbox" checked={form.clearKey} onChange={set("clearKey")} /> 勾选=清除已存 Key
-              </span>
-            )}
-          </label>
-          <label>
-            接口模式
-            <select value={form.api_mode} onChange={set("api_mode")}>
-              <option value="">自动</option>
-              <option value="chat_completions">chat_completions</option>
-              <option value="codex_responses">codex_responses</option>
-              <option value="anthropic_messages">anthropic_messages</option>
-            </select>
-          </label>
-          <label>上下文长度<input type="number" value={form.context_length ?? ""} onChange={set("context_length")} placeholder="可空" /></label>
-          <label className="chk">
-            <input type="checkbox" checked={form.discover_models} onChange={set("discover_models")} /> 自动发现模型
-          </label>
-          <label className="chk">
-            <input type="checkbox" checked={form.make_default} onChange={set("make_default")} /> 保存后设为默认
-          </label>
-        </div>
-
-        {validateResult && (
-          <p className={validateResult.ok ? "ok-line" : "error"}>
-            测试连接：{validateResult.ok ? "✅ 可用" : "❌ 失败"} {validateResult.message ?? ""}
-            {validateResult.models?.length ? `（发现 ${validateResult.models.length} 个模型）` : ""}
-          </p>
-        )}
-
-        <div className="form-actions">
-          <button className="ghost" onClick={handleValidate} disabled={busy || !form.base_url || !form.model}>
-            测试连接
-          </button>
-          <button onClick={handleSave} disabled={busy || !form.name || !form.base_url || !form.model}>
-            {busy ? "处理中…" : "保存"}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // ── 列表视图 ──
-  const filter = modelFilter.trim().toLowerCase();
-
-  const visibleFor = (c) => {
-    const models = (c.models ?? []).filter((m) => !hiddenSet(c).has(m));
-    if (!filter) return models;
-    return models.filter((m) =>
-      m.toLowerCase().includes(filter) ||
-      String(c.name ?? "").toLowerCase().includes(filter));
-  };
-
-  function hiddenSet(c) {
-    return new Set(c.hidden_models ?? []);
-  }
+  // ── 批量删除（勾选制）──
+  const rowKey = (vendorSlug, m) => `${vendorSlug}::${m}`;
 
   function toggleRow(vendorSlug, m) {
-    const k = `${vendorSlug}::${m}`;
+    const k = rowKey(vendorSlug, m);
     setChecked((prev) => {
       const next = new Set(prev);
       next.has(k) ? next.delete(k) : next.add(k);
@@ -291,24 +232,6 @@ export default function ModelConfigs() {
       keys.forEach((k) => (allOn ? next.delete(k) : next.add(k)));
       return next;
     });
-  }
-
-  // 单行删除（走 SQLite 隐藏，可恢复）
-  async function handleHideModel(c, m) {
-    setBusy(true);
-    try {
-      const r = await api(
-        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(m)}/hide`,
-        { method: "POST" });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) { showToast("err", `删除失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
-      showToast("ok", `已删除：${m}`);
-      await load(true);
-    } catch (e) {
-      showToast("err", "删除失败：" + e.message);
-    } finally {
-      setBusy(false);
-    }
   }
 
   async function handleBatchDelete() {
@@ -346,6 +269,18 @@ export default function ModelConfigs() {
 
   const totalVisible = configs.reduce((n, c) => n + visibleFor(c).length, 0);
   const checkedCount = checked.size;
+
+  function visibleFor(c) {
+    const models = (c.models ?? []).filter((m) => !hiddenSet(c).has(m));
+    if (!filter) return models;
+    return models.filter((m) =>
+      m.toLowerCase().includes(filter) ||
+      String(c.name ?? "").toLowerCase().includes(filter));
+  }
+
+  function hiddenSet(c) {
+    return new Set(c.hidden_models ?? []);
+  }
 
   return (
     <div className="page">
