@@ -348,30 +348,37 @@ export default function ModelConfigs() {
                     ) : (
                       <>
                         <ul className="chips selectable">
-                          {models.map((m) => (
-                            <li
-                              key={m}
-                              className={[
-                                "chip",
-                                isDefaultModel(c, m) ? "default" : "",
-                                sel?.model === m ? "selected" : "",
-                              ].join(" ").trim()}
-                              onClick={() => selectModel(c, m)}
-                              title={isDefaultModel(c, m) ? "当前默认" : "点击选中，再点下方按钮设为默认"}
-                            >
-                              {m}
-                              {isDefaultModel(c, m) && <span className="chip-tag">默认</span>}
-                            </li>
-                          ))}
+                          {models.map((m) => {
+                            const isSelected = sel?.model === m;
+                            return (
+                              <li
+                                key={m}
+                                className={[
+                                  "chip",
+                                  isDefaultModel(c, m) ? "default" : "",
+                                  isSelected ? "selected" : "",
+                                ].join(" ").trim()}
+                                onClick={() => selectModel(c, m)}
+                                title={isDefaultModel(c, m) ? "当前默认" : "点击选中"}
+                              >
+                                <span className="chip-name">{m}</span>
+                                {isDefaultModel(c, m) && <span className="chip-tag">默认</span>}
+                                {isSelected && (
+                                  <span className="chip-actions" onClick={(e) => e.stopPropagation()}>
+                                    <button
+                                      className="chip-btn primary"
+                                      onClick={() => handleSwitchModel()}
+                                      disabled={busy}
+                                    >
+                                      设为默认
+                                    </button>
+                                    <button className="chip-btn" onClick={() => setSelected(null)}>×</button>
+                                  </span>
+                                )}
+                              </li>
+                            );
+                          })}
                         </ul>
-                        {sel && (
-                          <div className="set-default-bar">
-                            <button onClick={handleSwitchModel} disabled={busy}>
-                              将「{sel.model}」设为默认
-                            </button>
-                            <button className="ghost" onClick={() => setSelected(null)} disabled={busy}>取消</button>
-                          </div>
-                        )}
                       </>
                     )}
                   </div>
