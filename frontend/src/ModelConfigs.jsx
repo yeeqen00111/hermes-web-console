@@ -175,8 +175,6 @@ export default function ModelConfigs() {
   }
 
   // ── 行内改名（编辑模型 ID）──
-  const [renaming, setRenaming] = useState(null);   // {vendorId, old, value}
-  const renameInput = useRef(null);
 
   async function handleRenameConfirm(c) {
     const nn = (renaming?.value ?? "").trim();
@@ -293,6 +291,24 @@ export default function ModelConfigs() {
       keys.forEach((k) => (allOn ? next.delete(k) : next.add(k)));
       return next;
     });
+  }
+
+  // 单行删除（走 SQLite 隐藏，可恢复）
+  async function handleHideModel(c, m) {
+    setBusy(true);
+    try {
+      const r = await api(
+        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(m)}/hide`,
+        { method: "POST" });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast("err", `删除失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
+      showToast("ok", `已删除：${m}`);
+      await load(true);
+    } catch (e) {
+      showToast("err", "删除失败：" + e.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleBatchDelete() {
@@ -439,6 +455,7 @@ export default function ModelConfigs() {
                               />
                             </th>
                             <th>模型</th>
+                            <th className="col-ops">操作</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -468,6 +485,13 @@ export default function ModelConfigs() {
                                     />
                                   ) : (
                                     m
+                                  )}
+                                </td>
+                                <td className="ops">
+                                  {!isDefault && (
+                                    <button className="link danger" onClick={() => handleHideModel(c, m)} disabled={busy}>
+                                      删除
+                                    </button>
                                   )}
                                 </td>
                               </tr>
