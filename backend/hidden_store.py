@@ -181,6 +181,21 @@ def rename_custom(vendor_slug: str, old: str, model: str, display_name=None,
         conn.close()
 
 
+def update_full(vendor_slug: str, old: str, model: str, display_name=None,
+                context_length=None, reasoning_effort=None) -> None:
+    """全字段覆盖更新（None 即清空；与 COALESCE 保留语义相对，供编辑弹框使用）。"""
+    conn = _conn()
+    try:
+        conn.execute(
+            "UPDATE custom_models SET model = ?, display_name = ?, context_length = ?, reasoning_effort = ? "
+            "WHERE vendor = ? AND model = ?",
+            (model, display_name, context_length, reasoning_effort, vendor_slug, old),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def delete_custom(vendor_slug: str, model: str) -> None:
     conn = _conn()
     try:
