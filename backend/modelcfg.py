@@ -276,7 +276,8 @@ def unhide_vendor_model(vendor_id: str, model_id: str):
 
 
 class AddModelBody(BaseModel):
-    name: str
+    name: str                                # 模型 ID（厂商 API 真名）
+    display_name: Optional[str] = None       # 展示名（前端列表显示用）
     context_length: Optional[int] = None
     reasoning_effort: Optional[str] = None   # minimal|low|medium|high|xhigh|max|ultra
 
@@ -315,7 +316,7 @@ def add_vendor_model(vendor_id: str, body: AddModelBody):
     if body.reasoning_effort and not effort:
         raise HTTPException(status_code=400,
                             detail=f"思考等级非法：{body.reasoning_effort}（合法：{', '.join(VALID_EFFORTS)}）")
-    add_custom(vendor_id, name, ctx_len, effort)
+    add_custom(vendor_id, name, body.display_name, ctx_len, effort)
     return {"ok": True, "model": name}
 
 
@@ -327,7 +328,9 @@ def rename_vendor_model(vendor_id: str, model_id: str, body: AddModelBody):
         raise HTTPException(status_code=400, detail="新模型名不能为空")
     if new_name == model_id:
         return {"ok": True, "model": new_name}
-    rename_custom(vendor_id, model_id, new_name)
+    rename_custom(vendor_id, model_id, new_name, body.display_name,
+                  body.context_length if body.context_length and body.context_length > 0 else None,
+                  body.reasoning_effort if body.reasoning_effort in VALID_EFFORTS else None)
     return {"ok": True, "model": new_name}
 
 

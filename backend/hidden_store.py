@@ -22,10 +22,15 @@ def _conn() -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS custom_models ("
         "vendor TEXT NOT NULL, model TEXT NOT NULL, "
+        "display_name TEXT, "
         "context_length INTEGER, reasoning_effort TEXT, "
         "created_at TEXT DEFAULT CURRENT_TIMESTAMP, "
         "PRIMARY KEY (vendor, model))"
     )
+    # 旧库迁移：补 display_name 列
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(custom_models)")]
+    if "display_name" not in cols:
+        conn.execute("ALTER TABLE custom_models ADD COLUMN display_name TEXT")
     return conn
 
 
@@ -72,47 +77,55 @@ def list_custom(vendor_slug: str) -> list:
     conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT model, context_length, reasoning_effort FROM custom_models "
+            "SELECT model, display_name, context_length, reasoning_effort FROM custom_models "
             "WHERE vendor = ? ORDER BY model", (vendor_slug,)
         ).fetchall()
-        return [{"model": r[0], "context_length": r[1], "reasoning_effort": r[2]} for r in rows]
+        return [{"model": r[0], "display_name": r[1], "context_length": r[2],
+                 "reasoning_effort": r[3]} for r in rows]
     finally:
         conn.close()
 
 
 def list_manual() -> list:
-    """全部厂商的手动模型条目（[{vendor, model, context_length, reasoning_effort}]）。"""
+    """全部厂商的手动模型条目（[{vendor, model, display_name, context_length, reasoning_effort}]）。"""
     conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT vendor, model, context_length, reasoning_effort FROM custom_models "
+            "SELECT vendor, model, display_name, context_length, reasoning_effort FROM custom_models "
             "ORDER BY vendor, model"
         ).fetchall()
-        return [{"vendor": r[0], "model": r[1], "context_length": r[2], "reasoning_effort": r[3]}
+        return [{"vendor": r[0], "model": r[1], "display_name": r[2],
+                 "context_length": r[3], "reasoning_effort": r[4]}
                 for r in rows]
     finally:
         conn.close()
 
 
-def add_custom(vendor_slug: str, model: str, context_length=None, reasoning_effort=None) -> None:
+def add_custom(vendor_slug: str, model: str, display_name=None, context_length=None, reasoning_effort=None) -> None:
     conn = _conn()
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO custom_models (vendor, model, context_length, reasoning_effort) "
-            "VALUES (?, ?, ?, ?)",
-            (vendor_slug, model, context_length, reasoning_effort),
+            "INSERT OR REPLACE INTO custom_models (vendor, model, display_name, context_length, reasoning_effort) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (vendor_slug, model, display_name, context_length, reasoning_effort),
         )
         conn.commit()
     finally:
         conn.close()
 
 
-def rename_custom(vendor_slug: str, old: str, new: str) -> None:
+def rename_custom(vendor_slug: str, old: str, model: str, display_name=None,
+                  context_length=None, reasoning_effort=None) -> None:
     conn = _conn()
     try:
         conn.execute(
-            "UPDATE custom_models SET model = ? WHERE vendor = ? AND model = ?",
-            (new, vendor_slug, old),
+            "UPDATE custom_models SET "
+            "model = COALESCE(?, model), "
+            "display_name = COALESCE(?, display_name), "
+            "context_length = COALESCE(?, context_length), "
+            "reasoning_effort = COALESCE(?, reasoning_effort) "
+            "WHERE vendor = ? AND model = ?",
+            (model, display_name, context_length, reasoning_effort, vendor_slug, old),
         )
         conn.commit()
     finally:
