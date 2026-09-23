@@ -54,8 +54,10 @@ export default function ModelConfigs() {
 
   useEffect(() => { load(); }, [load]);
 
-  const isDefaultModel = (c, m) =>
-    current && current.provider === c.id && current.model === m;
+  // 当前默认模型判定：厂商级用 options 自带的 is_current；模型级用 current.model 精确匹配。
+  // 注意 current.provider 是裸 'custom'，与厂商 slug 不相等——不能用 provider===id 判定（踩过坑）。
+  const isDefaultModel = (c, m) => !!c.is_current && !!current && current.model === m;
+  const currentVendor = configs.find((c) => c.is_current);
 
   function toggleExpand(id) {
     setExpanded((e) => ({ ...e, [id]: !e[id] }));
@@ -241,9 +243,11 @@ export default function ModelConfigs() {
     <div className="page">
       <header>
         <h1>模型配置</h1>
-        {current && (
-          <p className="meta">当前默认：{current.model}（{current.provider}）</p>
-        )}
+        <p className="meta">
+          {current?.model
+            ? `当前默认：${current.model}${currentVendor ? `（${currentVendor.name}）` : ""}`
+            : "未设置默认模型"}
+        </p>
         <button className="ghost" onClick={() => load()} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
         </button>
