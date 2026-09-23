@@ -158,7 +158,30 @@ def list_model_configs(refresh: bool = False):
                 "reasoning_effort": man.get("reasoning_effort"),
             })
 
+        # 兜底：当前默认模型不在 SQLite → 补存一份（含默认标记），保证列表第一条可见
+        default_entry = hidden_store.get_default()
+        if cur_provider and cur_model and (
+                default_entry is None or default_entry.get("model") != cur_model
+                or default_entry.get("vendor") != slug):
+            vend = next((ve for ve, _s, _k in _all_vendor_entries(doc)
+                         if _slug_for(str(ve.get("name") or "")) == cur_provider), None)
+            if vend is not None:
+                meta = (vend.get("models") or {}).get(cur_model, {}) if isinstance(vend.get("models"), dict) else {}
+                hidden_store.set_default(cur_provider, cur_model,
+                                         None, meta.get("context_length"), meta.get("reasoning_effort"))
+                default_entry = hidden_store.get_default()
+
         is_current = (cur_provider == slug) or                      (cur_provider.lower() == "custom" and bool(cur_base) and cur_base == base_url.rstrip("/"))
+        # 默认模型不在 entry.models 清单里（model 段直接指定）→ 补入条目
+        if default_entry and default_entry.get("vendor") == slug and                 not any(i["model"] == default_entry.get("model") for i in items):
+            items.append({"model": default_entry.get("model"), "display_name": None,
+                          "source": "default", "hidden": False,
+                          "context_length": default_entry.get("context_length"),
+                          "reasoning_effort": default_entry.get("reasoning_effort")})
+        for it in items:
+            it["is_default"] = bool(default_entry and default_entry.get("vendor") == slug
+                                    and default_entry.get("model") == it["model"])
+        items.sort(key=lambda i: (0 if i.get("is_default") else 1, i["model"]))   # 默认置顶
         configs.append({
             "id": slug,                                    # 切换/设默认用（model/set 认 slug）
             "manage_id": slug,                             # raw 通道下编辑/删除都用 slug
@@ -234,6 +257,8 @@ def upsert_model_config(body: ModelConfigBody):
             model_cfg["key_env"] = target["key_env"]
 
     _save_doc(doc)
+    if body.make_default:
+        hidden_store.set_default(_slug_for(body.name), body.model.strip())
     return {"ok": True, "endpoint_id": _slug_for(body.name)}
 
 
@@ -260,10 +285,7 @@ def activate_model_config(vendor_id: str):
     model_cfg["provider"] = _slug_for(v.get("name"))
     model_cfg["default"] = str(v.get("model") or "")
     model_cfg["base_url"] = str(v.get("base_url") or "").rstrip("/")
-    _save
-
-
-    _doc(doc)
+    _save_doc(doc)
     return {"ok": True}
 
 
@@ -279,6 +301,8 @@ def set_default_model(vendor_id: str, model: str):
     if isinstance(data, dict) and data.get("confirm_required"):
         return {"ok": False, "confirm_required": True,
                 "confirm_message": data.get("confirm_message", "")}
+    # SQLite 同步默认标记（列表第一条的依据）
+    hidden_store.set_default(vendor_id, model)
     return {"ok": True}
 
 
