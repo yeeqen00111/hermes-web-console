@@ -245,6 +245,20 @@ def set_default_model(vendor_id: str, model: str):
     return {"ok": True}
 
 
+class HideBatchBody(BaseModel):
+    models: List[str]
+
+
+@router.post("/{vendor_id}/models/hide-batch", dependencies=[Depends(require_app_token)])
+def hide_models_batch(vendor_id: str, body: HideBatchBody):
+    """批量隐藏（= 批量删除）。逐项幂等，已隐藏的忽略。"""
+    for m in body.models:
+        m = m.strip()
+        if m:
+            _hide(vendor_id, m)
+    return {"ok": True, "count": len([m for m in body.models if m.strip()])}
+
+
 @router.post("/{vendor_id}/models/{model_id}/hide", dependencies=[Depends(require_app_token)])
 def hide_vendor_model(vendor_id: str, model_id: str):
     """从可选列表隐藏一个模型（SQLite 展示层配置；Hermes config 不动）。"""
