@@ -184,3 +184,6 @@ button.link.confirm:hover { text-decoration: none; background: #b52d23; }
 .tag-edit { display: inline-flex; align-items: center; gap: 6px; }
 .tag-x { background: none; border: none; color: #8a9199; font-size: 13px; padding: 0 2px; line-height: 1; cursor: pointer; }
 .tag-x:hover { color: #d4382d; }
+/* ── 行内编辑 / 添加 ─────────────────────────────── */
+.cell-input { font-size: 12px; padding: 4px 8px; border-radius: 6px; border: 1px solid #d5d9de; width: 100%; min-width: 160px; }
+.cell-input:focus { outline: 2px solid #bfd0ff; border-color: #2160f3; }

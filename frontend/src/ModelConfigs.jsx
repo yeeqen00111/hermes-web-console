@@ -35,6 +35,9 @@ export default function ModelConfigs() {
   const [expanded, setExpanded] = useState({});          // {vendorSlug: bool}
   const [modelFilter, setModelFilter] = useState("");
   const [checked, setChecked] = useState(new Set());     // "vendor::model" 键集合
+  const [editRow, setEditRow] = useState(null);          // {vendorId, old} 行内改名
+  const [editValue, setEditValue] = useState("");
+  const [newModelName, setNewModelName] = useState("");
   const [modal, setModal] = useState(null);              // {type:'confirm'|'result', ...}
   const [busy, setBusy] = useState(false);
   const toastTimer = useRef(null);
@@ -171,6 +174,48 @@ export default function ModelConfigs() {
       await load(true);
     } catch (e) {
       showToast("err", "切换失败：" + e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 添加单个模型（后端合并语义，幂等）
+  async function handleAddModel(c) {
+    const name = newModelName.trim();
+    if (!name || busy) return;
+    setBusy(true);
+    try {
+      const r = await api(
+        `/api/model-configs/${encodeURIComponent(c.id)}/models`,
+        { method: "POST", body: JSON.stringify({ name }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast("err", `添加失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
+      showToast("ok", `已添加模型：${name}`);
+      setNewModelName("");
+      await load(true);
+    } catch (e) {
+      showToast("err", "添加失败：" + e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 行内重命名（后端 = 删旧名 + 加新名，元数据保留）
+  async function handleRename(c, oldName, newName) {
+    const nn = (newName || "").trim();
+    if (!nn || nn === oldName || busy) return;
+    setBusy(true);
+    try {
+      const r = await api(
+        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(oldName)}`,
+        { method: "PUT", body: JSON.stringify({ name: nn }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast("err", `重命名失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
+      showToast("ok", `已重命名：${oldName} → ${nn}`);
+      setEditRow(null);
+      await load(true);
+    } catch (e) {
+      showToast("err", "重命名失败：" + e.message);
     } finally {
       setBusy(false);
     }
@@ -423,26 +468,43 @@ export default function ModelConfigs() {
 
                 {open && (
                   <div className="vendor-models" onClick={(e) => e.stopPropagation()}>
-                    {visible.length === 0 ? (
-                      <p className="hint">
-                        该厂商还没有模型清单——「编辑」里手填，或保存后用「测试连接」自动发现。
-                      </p>
-                    ) : (
-                      <table className="vm-table">
-                        <thead>
-                          <tr>
-                            <th className="col-check">
-                              <input
-                                type="checkbox"
-                                checked={allChecked}
-                                onChange={() => toggleAllVendor(c, visible)}
-                              />
-                            </th>
-                            <th>模型</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {visible.map((m) => (
+                    <div className="vm-toolbar">
+                      <input
+                        className="vm-filter"
+                        type="search"
+                        placeholder="过滤模型…"
+                        value={modelFilter}
+                        onChange={(e) => setModelFilter(e.target.value)}
+                      />
+                      <span className="hint">{visible.length} 个模型</span>
+                    </div>
+                    <table className="vm-table">
+                      <thead>
+                        <tr>
+                          <th className="col-check">
+                            <input
+                              type="checkbox"
+                              checked={visible.length > 0 && visible.every((m) => checked.has(rowKey(c.id, m)))}
+                              onChange={() => {
+                                const keys = visible.map((m) => rowKey(c.id, m));
+                                const allOn = keys.every((k) => checked.has(k));
+                                setChecked((prev) => {
+                                  const next = new Set(prev);
+                                  keys.forEach((k) => (allOn ? next.delete(k) : next.add(k)));
+                                  return next;
+                                });
+                              }}
+                            />
+                          </th>
+                          <th>模型</th>
+                          <th className="col-ops">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visible.map((m) => {
+                          const isDefault = isDefaultModel(c, m);
+                          const editingRow = editRow && editRow.vendorId === c.id && editRow.old === m;
+                          return (
                             <tr key={m}>
                               <td className="col-check">
                                 <input
@@ -451,12 +513,61 @@ export default function ModelConfigs() {
                                   onChange={() => toggleRow(c.id, m)}
                                 />
                               </td>
-                              <td className="mono">{m}</td>
+                              <td className="mono">
+                                {editingRow ? (
+                                  <input
+                                    className="cell-input"
+                                    value={editValue}
+                                    autoFocus
+                                    onChange={(e) => setEditValue(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") handleRename(c, m, editValue);
+                                      if (e.key === "Escape") setEditRow(null);
+                                    }}
+                                  />
+                                ) : (
+                                  m
+                                )}
+                              </td>
+                              <td className="ops">
+                                {editingRow ? (
+                                  <>
+                                    <button className="link" onClick={() => handleRename(c, m, editValue)} disabled={busy || !editValue.trim()}>
+                                      保存
+                                    </button>
+                                    <button className="link" onClick={() => setEditRow(null)}>取消</button>
+                                  </>
+                                ) : (
+                                  <>
+                                    {isDefault && <span className="pill pill-on">默认</span>}
+                                    <button className="link" onClick={() => { setEditRow({ vendorId: c.id, old: m }); setEditValue(m); }} disabled={busy}>
+                                      编辑
+                                    </button>
+                                  </>
+                                )}
+                              </td>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
+                          );
+                        })}
+                        <tr>
+                          <td className="col-check"></td>
+                          <td>
+                            <input
+                              className="cell-input"
+                              value={newModelName}
+                              onChange={(e) => setNewModelName(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") handleAddModel(c); }}
+                              placeholder="新模型名，回车添加"
+                            />
+                          </td>
+                          <td className="ops">
+                            <button className="link" onClick={() => handleAddModel(c)} disabled={busy || !newModelName.trim()}>
+                              添加
+                            </button>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
                   </div>
                 )}
               </div>

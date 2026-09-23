@@ -156,7 +156,14 @@ def _apply_vendor_fields(entry: Dict[str, Any], body: ModelConfigBody) -> None:
         entry["context_length"] = int(body.context_length)
     entry["discover_models"] = bool(body.discover_models)
     if body.models is not None:
-        entry["models"] = {m: {} for m in body.models if m.strip()}
+        # 合并语义（与官方 _write_custom_endpoint 一致）：body.models 只增/更新，
+        # 已有项保留——「移除」走独立的模型删除端点。
+        existing = entry.get("models") if isinstance(entry.get("models"), dict) else {}
+        for m in body.models:
+            m = m.strip()
+            if m:
+                existing.setdefault(m, {})
+        entry["models"] = existing
     # api_key 的写入/清除在 upsert 主函数里走 PUT/DELETE /api/env（.env + key_env 引用，
     # 与官方 upsert 同款生命周期），不在此处处理。
 
@@ -271,6 +278,61 @@ def unhide_vendor_model(vendor_id: str, model_id: str):
     """恢复显示一个已隐藏的模型。"""
     _unhide(vendor_id, model_id)
     return {"ok": True, "hidden": False}
+
+
+class AddModelBody(BaseModel):
+    name: str
+
+
+class RenameModelBody(BaseModel):
+    name: str
+
+
+@router.post("/{vendor_id}/models", dependencies=[Depends(require_app_token)])
+def add_vendor_model(vendor_id: str, body: AddModelBody):
+    """向厂商清单添加单个模型（幂等；已存在返回 409）。"""
+    doc = _load_doc()
+    v, _sec, _key = _find_vendor(doc, vendor_id)
+    if v is None:
+        raise HTTPException(status_code=404, detail=f"找不到厂商 {vendor_id}")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="模型名不能为空")
+    models = v.get("models")
+    if not isinstance(models, dict):
+        models = {}
+    if name in models:
+        raise HTTPException(status_code=409, detail=f"模型 {name} 已存在")
+    models[name] = {}
+    v["models"] = models
+    _save_doc(doc)
+    return {"ok": True, "model": name}
+
+
+@router.put("/{vendor_id}/models/{model_id}", dependencies=[Depends(require_app_token)])
+def rename_vendor_model(vendor_id: str, model_id: str, body: AddModelBody):
+    """重命名（编辑）单个模型：旧名出、新名进，元数据保留。"""
+    doc = _load_doc()
+    v, _sec, _key = _find_vendor(doc, vendor_id)
+    if v is None:
+        raise HTTPException(status_code=404, detail=f"找不到厂商 {vendor_id}")
+    models = v.get("models")
+    if not isinstance(models, dict) or model_id not in models:
+        raise HTTPException(status_code=404, detail=f"厂商 {v.get('name')} 的清单里没有 {model_id}")
+    new_name = body.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="新模型名不能为空")
+    if new_name == model_id:
+        return {"ok": True, "model": new_name}
+    if new_name in models:
+        raise HTTPException(status_code=409, detail=f"模型 {new_name} 已存在")
+    meta = models.pop(model_id)
+    models[new_name] = meta
+    # 若该厂商的默认模型正是被改名的那个，同步改默认
+    if str(v.get("model")) == model_id:
+        v["model"] = new_name
+    _save_doc(doc)
+    return {"ok": True, "model": new_name}
 
 
 @router.delete("/{vendor_id}/models/{model_id}", dependencies=[Depends(require_app_token)])
