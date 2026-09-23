@@ -20,7 +20,7 @@ from pydantic import BaseModel
 import hidden_store
 from hidden_store import (
     add_custom, delete_custom, hide_model as _hide, list_custom, rename_custom,
-    unhide_model as _unhide,
+    unhide_model as _unhide, update_full,
 )
 
 router = APIRouter(prefix="/api/model-configs", tags=["model-configs"])
@@ -381,15 +381,52 @@ def add_vendor_model(vendor_id: str, body: AddModelBody):
 
 @router.put("/{vendor_id}/models/{model_id}", dependencies=[Depends(require_app_token)])
 def rename_vendor_model(vendor_id: str, model_id: str, body: AddModelBody):
-    """重命名（编辑）一个模型：SQLite 内旧名出、新名进（元数据保留）。"""
+    """编辑一个模型：改名（旧出/新进）+ 元数据更新。
+    SQLite 无该行（config/discovery 模型首次编辑）→ 直接写入手动条目；
+    只改元数据不改 ID 也要更新；默认模型跟随改名。"""
     new_name = body.name.strip()
     if not new_name:
         raise HTTPException(status_code=400, detail="新模型名不能为空")
-    if new_name == model_id:
-        return {"ok": True, "model": new_name}
-    rename_custom(vendor_id, model_id, new_name, body.display_name,
-                  body.context_length if body.context_length and body.context_length > 0 else None,
-                  body.reasoning_effort if body.reasoning_effort in VALID_EFFORTS else None)
+    ctx_len = body.context_length if body.context_length and body.context_length > 0 else None
+    effort = body.reasoning_effort if body.reasoning_effort in VALID_EFFORTS else None
+    display_name = body.display_name
+
+    exists = any(m["model"] == model_id for m in hidden_store.list_custom(vendor_id))
+    if exists:
+        # 已有手动条目：全字段覆盖（编辑弹框所见即所得，清空也生效）
+        update_full(vendor_id, model_id, new_name, display_name, ctx_len, effort)
+    else:
+        # config/discovery 模型首次编辑 → 写入手动条目（列表随之带元数据）
+        add_custom(vendor_id, new_name, display_name, ctx_len, effort)
+    # 编辑 = 关注该模型 → 自动取消隐藏（否则前端过滤掉看不到改动）
+    _unhide(vendor_id, new_name)
+
+    # 默认模型跟随改名（SQLite 标记 + config model 段）
+    d = hidden_store.get_default()
+    if d and d.get("vendor") == vendor_id and d.get("model") == model_id and new_name != model_id:
+        hidden_store.set_default(vendor_id, new_name)
+        doc = _load_doc()
+        model_cfg = doc.get("model") or {}
+        if str(model_cfg.get("provider", "")) == vendor_id and str(model_cfg.get("default", "")) == model_id:
+            model_cfg["default"] = new_name
+            doc["model"] = model_cfg
+            _save_doc(doc)
+
+    # 思考等级运行时生效：写 agent.reasoning_overrides（旧名清理、新名置位）
+    if effort:
+        doc2 = _load_doc()
+        agent_cfg = doc2.setdefault("agent", {})
+        ov = agent_cfg.get("reasoning_overrides")
+        if not isinstance(ov, dict):
+            ov = {}
+        ov.pop(model_id, None)
+        ov[new_name] = effort
+        agent_cfg["reasoning_overrides"] = ov
+        import yaml as _y
+        _raw_ok(hc.request("PUT", "/api/config/raw",
+                           json={"yaml_text": _y.safe_dump(doc2, allow_unicode=True, sort_keys=False)}),
+                "overrides-write")
+
     return {"ok": True, "model": new_name}
 
 
