@@ -504,9 +504,14 @@ export default function ModelConfigs() {
                                 </td>
                                 <td className="ops">
                                   {!isDefault && (
-                                    <button className="link danger" onClick={() => handleHideModel(c, m)} disabled={busy}>
-                                      删除
-                                    </button>
+                                    <>
+                                      <button className="link" onClick={() => askEditModel(c, m)} disabled={busy || !man}>
+                                        编辑
+                                      </button>
+                                      <button className="link danger" onClick={() => handleHideModel(c, m)} disabled={busy}>
+                                        删除
+                                      </button>
+                                    </>
                                   )}
                                 </td>
                               </tr>
