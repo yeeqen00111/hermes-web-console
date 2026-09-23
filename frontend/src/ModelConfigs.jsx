@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // 模型配置管理页：厂商（自定义端点）→ 模型 两级结构。
-// 每个模型项常显操作：设默认（model/set）+ 删除（PUT /api/config 整列表替换 legacy 段）。
-// 模型清单新增走表单 tag 输入（upsert 合并语义）。
+// 删除 = 勾选（支持全选）+ 批量删除，底层为 SQLite 隐藏清单（config.yaml 不动，
+// 规避 models_discovered 自动回写）。已删除的模型直接从列表消失。
 const EMPTY_FORM = {
   id: null,
   name: "",
-  
   base_url: "",
   model: "",
   api_key: "",
@@ -29,16 +28,15 @@ export default function ModelConfigs() {
   const [configs, setConfigs] = useState([]);
   const [current, setCurrent] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState(null);   // null=列表, config=编辑, {} =新增
+  const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [modelInput, setModelInput] = useState("");
   const [validateResult, setValidateResult] = useState(null);
-  const [expanded, setExpanded] = useState({});   // {endpoint_id: bool}
+  const [expanded, setExpanded] = useState({});          // {vendorSlug: bool}
   const [modelFilter, setModelFilter] = useState("");
-  const [showHidden, setShowHidden] = useState(false);
+  const [checked, setChecked] = useState(new Set());     // "vendor::model" 键集合
+  const [modal, setModal] = useState(null);              // {type:'confirm'|'result', ...}
   const [busy, setBusy] = useState(false);
-  const [toast, setToast] = useState(null);       // {type:'ok'|'err', msg}
-  const [modal, setModal] = useState(null);       // {type:'confirm', vendor, model} | {type:'result', ok, msg}
   const toastTimer = useRef(null);
 
   const showToast = useCallback((type, msg) => {
@@ -46,6 +44,8 @@ export default function ModelConfigs() {
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), type === "ok" ? 3000 : 6000);
   }, []);
+
+  const [toast, setToast] = useState(null);
 
   const load = useCallback(async (refresh = false) => {
     setLoading(true);
@@ -64,14 +64,12 @@ export default function ModelConfigs() {
 
   useEffect(() => { load(); }, [load]);
 
-  // 当前默认模型判定：厂商级用 options 自带的 is_current；模型级用 current.model 精确匹配。
-  // 注意 current.provider 是裸 'custom'，与厂商 slug 不相等——不能用 provider===id 判定（踩过坑）。
   const isDefaultModel = (c, m) => !!c.is_current && !!current && current.model === m;
   const currentVendor = configs.find((c) => c.is_current);
 
   function toggleExpand(id) {
     setExpanded((e) => ({ ...e, [id]: !e[id] }));
-    setModelFilter("");   // 切换展开时清过滤
+    setModelFilter("");
   }
 
   function openCreate() {
@@ -83,7 +81,7 @@ export default function ModelConfigs() {
 
   function openEdit(c) {
     setForm({
-      id: c.manage_id,                        // 编辑/删除走 custom-endpoints 体系，用它的 id
+      id: c.manage_id,
       name: c.name ?? "", base_url: c.base_url ?? "", model: c.model ?? "",
       api_key: "", clearKey: false,
       api_mode: c.api_mode ?? "",
@@ -159,7 +157,6 @@ export default function ModelConfigs() {
     }
   }
 
-  // 常显按钮：设为默认 / 删除（行内二次确认，结果走 toast）
   async function handleSwitchModel(c, m) {
     if (isDefaultModel(c, m)) return;
     setBusy(true);
@@ -179,53 +176,72 @@ export default function ModelConfigs() {
     }
   }
 
-  // 删除：弹框确认 → 执行 → 弹框反馈（用户定案的交互）
-  function askHideModel(c, m) {
-    setModal({ type: "confirm", vendor: c, model: m });
-  }
-
-  async function handleHideModel() {
-    const { vendor, model } = modal;
+  async function handleDeleteVendor(c) {
+    if (!window.confirm(`确定删除厂商「${c.name}」？`)) return;
     setBusy(true);
     try {
-      const r = await api(
-        `/api/model-configs/${encodeURIComponent(vendor.id)}/models/${encodeURIComponent(model)}/hide`,
-        { method: "POST" });
-      const d = await r.json().catch(() => ({}));
-      const ok = r.ok;
-      setModal({ type: "result", ok, msg: ok ? `已删除：${model}` : (d.detail ?? `HTTP ${r.status}`) });
-      if (ok) await load(true);   // 写操作后强制破 picker 缓存刷新
-    } catch (e) {
-      setModal({ type: "result", ok: false, msg: "操作失败：" + e.message });
+      const r = await api(`/api/model-configs/${encodeURIComponent(c.id)}`, { method: "DELETE" });
+      if (!r.ok) { showToast("err", `删除失败 HTTP ${r.status}`); return; }
+      showToast("ok", `已删除厂商「${c.name}」`);
+      await load(true);
     } finally {
       setBusy(false);
     }
   }
 
-  async function handleUnhideModel(c, m) {
-    setBusy(true);
-    try {
-      const r = await api(
-        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(m)}/unhide`,
-        { method: "POST" });
-      if (!r.ok) { showToast("err", `删除失败 HTTP ${r.status}`); return; }
-      showToast("ok", `已恢复：${m}`);
-      await load(true);
-    } catch (e) {
-      showToast("err", "恢复失败：" + e.message);
-    } finally {
-      setBusy(false);
-    }
+  // ── 批量删除（勾选制）──
+  const rowKey = (vendorSlug, m) => `${vendorSlug}::${m}`;
+
+  function toggleRow(vendorSlug, m) {
+    const k = rowKey(vendorSlug, m);
+    setChecked((prev) => {
+      const next = new Set(prev);
+      next.has(k) ? next.delete(k) : next.add(k);
+      return next;
+    });
   }
 
-  async function handleDelete(c) {
-    if (!c.manage_id) return;
+  function toggleAllVendor(c, visible) {
+    const key0 = rowKey(c.id, visible[0]);
+    const allOn = visible.every((m) => checked.has(rowKey(c.id, m)));
+    setChecked((prev) => {
+      const next = new Set(prev);
+      visible.forEach((m) => {
+        const k = rowKey(c.id, m);
+        allOn ? next.delete(k) : next.add(k);
+      });
+      return next;
+    });
+  }
+
+  async function handleBatchDelete() {
+    const items = [...checked].map((k) => {
+      const [vendorId, ...rest] = k.split("::");
+      return { vendorId, model: rest.join("::") };
+    });
+    if (items.length === 0) return;
     setBusy(true);
+    let okCount = 0, fail = [];
     try {
-      const r = await api(`/api/model-configs/${encodeURIComponent(c.manage_id)}`, { method: "DELETE" });
-      if (!r.ok) { showToast("err", `删除失败 HTTP ${r.status}`); return; }
-      showToast("ok", `已删除「${c.name}」`);
+      // 按厂商分组，各组一次 hide-batch
+      const byVendor = {};
+      items.forEach(({ vendorId, model }) => {
+        (byVendor[vendorId] = byVendor[vendorId] || []).push(model);
+      });
+      for (const [vendorId, models] of Object.entries(byVendor)) {
+        const r = await api(
+          `/api/model-configs/${encodeURIComponent(vendorId)}/models/hide-batch`,
+          { method: "POST", body: JSON.stringify({ models }) });
+        if (r.ok) okCount += models.length;
+        else fail.push(vendorId);
+      }
+      setModal(null);
+      if (fail.length) showToast("err", `部分删除失败（${fail.join(", ")}）`);
+      else showToast("ok", `已删除 ${okCount} 个模型`);
+      setChecked(new Set());
       await load(true);
+    } catch (e) {
+      showToast("err", "批量删除失败：" + e.message);
     } finally {
       setBusy(false);
     }
@@ -272,39 +288,10 @@ export default function ModelConfigs() {
           <label className="chk">
             <input type="checkbox" checked={form.discover_models} onChange={set("discover_models")} /> 自动发现模型
           </label>
+          <label>模型清单（逗号分隔，可空）<input value={form.models ?? ""} onChange={set("models")} placeholder="m1, m2, …" /></label>
           <label className="chk">
             <input type="checkbox" checked={form.make_default} onChange={set("make_default")} /> 保存后设为默认
           </label>
-        </div>
-
-        {/* 模型清单：已有=只读（接口合并语义只增不删，不放假删除）；新增=tag 输入 */}
-        <div className="models-editor">
-          {isEdit && (editing.models ?? []).length > 0 && (
-            <>
-              <p className="hint">已有模型（只读——接口限制，删除需修改服务器配置文件）：</p>
-              <ul className="chips readonly">
-                {(editing.models ?? []).map((m) => <li key={m} className="chip">{m}</li>)}
-              </ul>
-            </>
-          )}
-          <p className="hint">新增模型（输入后回车添加，可连加多个）：</p>
-          <input
-            className="search"
-            value={modelInput}
-            onChange={(e) => setModelInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addModelTag(); } }}
-            placeholder="输入模型名，回车添加"
-          />
-          {form.newModels.length > 0 && (
-            <ul className="chips">
-              {form.newModels.map((m) => (
-                <li key={m} className="chip tag-edit">
-                  {m}
-                  <button className="tag-x" onClick={() => setForm((f) => ({ ...f, newModels: f.newModels.filter((x) => x !== m) }))}>×</button>
-                </li>
-              ))}
-            </ul>
-          )}
         </div>
 
         {validateResult && (
@@ -322,42 +309,43 @@ export default function ModelConfigs() {
             {busy ? "处理中…" : "保存"}
           </button>
         </div>
-        <p className="hint">说明：端点默认模型是该厂商的标识模型；切换全局默认在列表页选中模型后点「设为默认」。</p>
+        <p className="hint">说明：端点默认模型是该厂商的标识模型；切换全局默认在列表页勾选后点「删除所选」。</p>
       </div>
     );
   }
 
-  // ── 列表视图（厂商 → 模型 两级）──
+  // ── 列表视图（厂商 → 模型，勾选批量删除）──
+  const filter = modelFilter.trim().toLowerCase();
+
+  const visibleFor = (c) => {
+    const models = (c.models ?? []).filter((m) => !hiddenSet(c).has(m));
+    if (!filter) return models;
+    return models.filter((m) =>
+      m.toLowerCase().includes(filter) ||
+      String(c.name ?? "").toLowerCase().includes(filter));
+  };
+
+  function hiddenSet(c) {
+    return new Set(c.hidden_models ?? []);
+  }
+
+  const totalVisible = configs.reduce((n, c) => n + visibleFor(c).length, 0);
+  const checkedCount = [...checked].length;
+
   return (
     <div className="page">
       {toast && <div className={`toast ${toast.type}`}>{toast.msg}</div>}
       {modal && (
-        <div className="modal-mask" onClick={() => modal.type === "result" && setModal(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            {modal.type === "confirm" ? (
-              <>
-                <h3>删除模型</h3>
-                <p>
-                  确定删除「{modal.vendor.name}」的模型<br />
-                  <b className="mono">{modal.model}</b> 吗？
-                </p>
-                <p className="hint">该模型将从列表中移除，可随时恢复。</p>
-                <div className="modal-actions">
-                  <button className="ghost" onClick={() => setModal(null)} disabled={busy}>取消</button>
-                  <button className="danger-solid" onClick={handleHideModel} disabled={busy}>
-                    {busy ? "处理中…" : "确认删除"}
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <h3>{modal.ok ? "✅ 已删除" : "❌ 删除失败"}</h3>
-                <p className={modal.ok ? "ok-line" : "error"}>{modal.msg}</p>
-                <div className="modal-actions">
-                  <button onClick={() => setModal(null)}>好的</button>
-                </div>
-              </>
-            )}
+        <div className="modal-mask" onClick={() => setModal(null)}>
+          <div className="modal">
+            <h3>{modal.title}</h3>
+            <p>{modal.msg}</p>
+            <div className="modal-actions">
+              <button className="ghost" onClick={() => setModal(null)}>取消</button>
+              <button className="danger-solid" onClick={modal.onConfirm} disabled={busy}>
+                {busy ? "处理中…" : modal.confirmText}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -368,128 +356,106 @@ export default function ModelConfigs() {
             ? `当前默认：${current.model}${currentVendor ? `（${currentVendor.name}）` : ""}`
             : "未设置默认模型"}
         </p>
-        <button className="ghost" onClick={() => load()} disabled={loading}>
+        <button className="ghost" onClick={() => load(true)} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
         </button>
       </header>
 
-      {!loading && configs.length === 0 ? (
+      <input
+        className="search"
+        type="search"
+        placeholder="搜索模型…"
+        value={modelFilter}
+        onChange={(e) => setModelFilter(e.target.value)}
+      />
+
+      {checkedCount > 0 && (
+        <button
+          className="ghost batch-del"
+          onClick={() => setModal({
+            title: "删除所选模型",
+            msg: `确定删除所选的 ${checkedCount} 个模型吗？`,
+            confirmText: `删除所选（${checkedCount}）`,
+            onConfirm: handleBatchDelete,
+          })}
+          disabled={busy}
+        >
+          删除所选（{checkedCount}）
+        </button>
+      )}
+
+      {loading && <p className="hint">加载中…</p>}
+
+      {!loading && totalVisible === 0 ? (
         <div className="state-block">
-          <p>还没有模型配置。</p>
-          <p className="hint">点击右上「＋ 新增厂商端点」。</p>
+          <p>没有模型。</p>
+          <p className="hint">点「＋ 新增模型配置」添加第一个厂商端点。</p>
         </div>
       ) : (
         <div className="vendors">
           {configs.map((c) => {
             const open = !!expanded[c.id];
-            const models = c.models ?? [];
-            const hiddenSet = new Set(c.hidden_models ?? []);
-            // 默认视图：只显示未删除的；勾选「显示已删除」后全部显示（已删除的置灰）
-            const visibleModels = models.filter((m) => showHidden || !hiddenSet.has(m));
+            const visible = visibleFor(c);
+            const allChecked = visible.length > 0 && visible.every((m) => checked.has(rowKey(c.id, m)));
+            const someChecked = visible.some((m) => checked.has(rowKey(c.id, m)));
             return (
               <div className="vendor" key={c.id}>
                 <div className="vendor-row" onClick={() => toggleExpand(c.id)}>
+                  <input
+                    type="checkbox"
+                    className="row-check"
+                    checked={allChecked}
+                    ref={(el) => { if (el) el.indeterminate = someChecked && !allChecked; }}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => toggleAllVendor(c, visible)}
+                  />
                   <span className={`arrow ${open ? "open" : ""}`}>▸</span>
                   <span className="mono v-name">{c.name}</span>
                   <span className="mono dim v-url">{c.base_url}</span>
-                  <span className="pill">
-                    {c.is_current && current
-                      ? <span className="pill pill-on">● {current.model}</span>
-                      : <span className="pill">未激活</span>}
-                  </span>
+                  {c.is_current && current && (
+                    <span className="pill pill-on">● {current.model}</span>
+                  )}
                   <span className="v-ops" onClick={(e) => e.stopPropagation()}>
-                    <button className="link" onClick={() => openEdit(c)} disabled={busy || !c.manage_id}
-                            title={c.manage_id ? "" : "该厂商在 legacy 配置段，暂不支持界面编辑"}>
-                      编辑
-                    </button>
-                    <button className="link danger" onClick={() => handleDelete(c)}
-                            disabled={busy || !c.manage_id}
-                            title={c.manage_id ? "" : "该厂商在 legacy 配置段，暂不支持界面删除"}>
-                      删除
-                    </button>
+                    <button className="link" onClick={() => openEdit(c)} disabled={busy}>编辑</button>
+                    <button className="link danger" onClick={() => handleDeleteVendor(c)} disabled={busy}>删除</button>
                   </span>
                 </div>
 
                 {open && (
                   <div className="vendor-models" onClick={(e) => e.stopPropagation()}>
-                    {models.length === 0 ? (
+                    {visible.length === 0 ? (
                       <p className="hint">
                         该厂商还没有模型清单——「编辑」里手填，或保存后用「测试连接」自动发现。
                       </p>
                     ) : (
-                      <>
-                        <div className="vm-toolbar">
-                          <input
-                            className="vm-filter"
-                            type="search"
-                            placeholder="过滤模型…"
-                            value={modelFilter}
-                            onChange={(e) => setModelFilter(e.target.value)}
-                          />
-                          <span className="hint">
-                            {visibleModels.length} / {models.length} 个模型
-                          </span>
-                          <label className="chk">
-                            <input
-                              type="checkbox"
-                              checked={showHidden}
-                              onChange={(e) => setShowHidden(e.target.checked)}
-                            />
-                            显示已删除
-                          </label>
-                        </div>
-                        <div className="vm-table-wrap">
-                          <table className="vm-table">
-                            <thead>
-                              <tr>
-                                <th>模型</th>
-                                <th className="col-status">状态</th>
-                                <th className="col-ops">操作</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {visibleModels
-                                .sort((a, b) => {
-                                  const aDef = isDefaultModel(c, a), bDef = isDefaultModel(c, b);
-                                  if (aDef !== bDef) return aDef ? -1 : 1;   // 默认置顶
-                                  return a.localeCompare(b);
-                                })
-                                .map((m) => {
-                                  const isDefault = isDefaultModel(c, m);
-                                  const isHidden = (c.hidden_models ?? []).includes(m);
-                                  return (
-                                    <tr key={m} className={isHidden ? "row-hidden" : ""}>
-                                      <td className="mono">{m}</td>
-                                      <td>
-                                        {isDefault
-                                          ? <span className="pill pill-on">● 当前默认</span>
-                                          : isHidden
-                                            ? <span className="pill">已删除</span>
-                                            : <span className="pill">可切换</span>}
-                                      </td>
-                                      <td className="ops">
-                                        {!isDefault && !isHidden && (
-                                          <button className="link" onClick={() => handleSwitchModel(c, m)} disabled={busy}>
-                                            设默认
-                                          </button>
-                                        )}
-                                        {isHidden ? (
-                                          <button className="link" onClick={() => handleUnhideModel(c, m)} disabled={busy}>
-                                            恢复
-                                          </button>
-                                        ) : (
-                                          <button className="link danger" onClick={() => askHideModel(c, m)} disabled={busy || isDefault}>
-                                            删除
-                                          </button>
-                                        )}
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                            </tbody>
-                          </table>
-                        </div>
-                      </>
+                      <table className="vm-table">
+                        <thead>
+                          <tr>
+                            <th className="col-check">
+                              <input
+                                type="checkbox"
+                                checked={allChecked}
+                                onChange={() => toggleAllVendor(c, visible)}
+                              />
+                            </th>
+                            <th>模型</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visible.map((m) => (
+                            <tr key={m}>
+                              <td className="col-check">
+                                <input
+                                  type="checkbox"
+                                  checked={checked.has(rowKey(c.id, m))}
+                                  onChange={() => toggleRow(c.id, m)}
+                                />
+                              </td>
+                              <td className="mono">{m}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     )}
                   </div>
                 )}
@@ -498,9 +464,6 @@ export default function ModelConfigs() {
           })}
         </div>
       )}
-
-      <button className="add-btn" onClick={openCreate}>＋ 新增厂商端点</button>
-      <p className="hint">切换说明：选中模型后点「设为默认」= 修改全局默认模型（影响之后的新会话）；对话中的热切换在「对话」页顶栏（待上线）。</p>
     </div>
   );
 }
