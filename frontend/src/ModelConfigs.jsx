@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 // 模型配置管理页：厂商（自定义端点）→ 模型 两级结构。
-// 厂商行可展开为该厂商的模型 chips；点任意模型 = 切换全局默认模型。
-// 模型来源 = 自动发现 + 手填的合集（每个端点的 models[]）。
+// 交互原则：浏览（chip 点击=选中）与操作（显式「设为默认」按钮）分离，防误触。
+// 模型清单：已有模型只读（upsert 合并语义只增不删，界面不放假删除）；新增走 tag 输入。
 const EMPTY_FORM = {
   id: null,
   name: "",
@@ -13,7 +13,7 @@ const EMPTY_FORM = {
   api_mode: "",
   context_length: "",
   discover_models: true,
-  models: "",
+  newModels: [],
   make_default: false,
 };
 
@@ -32,8 +32,10 @@ export default function ModelConfigs() {
   const [notice, setNotice] = useState("");
   const [editing, setEditing] = useState(null);   // null=列表, config=编辑, {} =新增
   const [form, setForm] = useState(EMPTY_FORM);
+  const [modelInput, setModelInput] = useState("");
   const [validateResult, setValidateResult] = useState(null);
   const [expanded, setExpanded] = useState({});   // {endpoint_id: bool}
+  const [selected, setSelected] = useState(null); // {vendorId, model} 本地选中态，未生效
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -61,10 +63,17 @@ export default function ModelConfigs() {
 
   function toggleExpand(id) {
     setExpanded((e) => ({ ...e, [id]: !e[id] }));
+    setSelected(null);   // 收起/切换厂商时清掉未生效的选中态
+  }
+
+  function selectModel(c, m) {
+    if (isDefaultModel(c, m)) return;    // 已是默认，无需选择
+    setSelected({ vendorId: c.id, model: m });
   }
 
   function openCreate() {
     setForm(EMPTY_FORM);
+    setModelInput("");
     setValidateResult(null);
     setEditing({});
   }
@@ -77,15 +86,25 @@ export default function ModelConfigs() {
       api_mode: c.api_mode ?? "",
       context_length: c.context_length ?? "",
       discover_models: c.discover_models ?? true,
-      models: (c.models ?? []).join(", "),
+      newModels: [],
       make_default: false,
     });
+    setModelInput("");
     setValidateResult(null);
     setEditing(c);
   }
 
+  function addModelTag() {
+    const m = modelInput.trim();
+    if (!m) return;
+    setForm((f) => ({
+      ...f,
+      newModels: f.newModels.includes(m) ? f.newModels : [...f.newModels, m],
+    }));
+    setModelInput("");
+  }
+
   function buildPayload() {
-    const models = form.models.split(",").map((s) => s.trim()).filter(Boolean);
     const payload = {
       name: form.name.trim(),
       base_url: form.base_url.trim(),
@@ -98,7 +117,7 @@ export default function ModelConfigs() {
     if (form.id) payload.id = form.id;
     if (form.clearKey) payload.api_key = "";
     else if (form.api_key.trim()) payload.api_key = form.api_key.trim();
-    if (models.length) payload.models = models;
+    if (form.newModels.length) payload.models = form.newModels;
     return payload;
   }
 
@@ -138,19 +157,20 @@ export default function ModelConfigs() {
     }
   }
 
-  // 点模型 chip = 切换全局默认模型
-  async function handleSwitchModel(c, m) {
-    if (isDefaultModel(c, m)) return;
+  // 显式按钮触发：切换全局默认模型
+  async function handleSwitchModel() {
+    if (!selected) return;
     setBusy(true);
     setError(""); setNotice("");
     try {
       const r = await api(
-        `/api/model-configs/${encodeURIComponent(c.id)}/default?model=${encodeURIComponent(m)}`,
+        `/api/model-configs/${encodeURIComponent(selected.vendorId)}/default?model=${encodeURIComponent(selected.model)}`,
         { method: "POST" });
       const d = await r.json().catch(() => ({}));
       if (d.confirm_required) { setError(`需要确认：${d.confirm_message}`); return; }
       if (!r.ok) { setError(`切换失败 HTTP ${r.status}`); return; }
-      setNotice(`默认模型已切换：${c.name} / ${m}`);
+      setNotice(`默认模型已切换：${selected.model}`);
+      setSelected(null);
       await load();
     } finally {
       setBusy(false);
@@ -211,10 +231,39 @@ export default function ModelConfigs() {
           <label className="chk">
             <input type="checkbox" checked={form.discover_models} onChange={set("discover_models")} /> 自动发现模型
           </label>
-          <label>模型清单（逗号分隔，可空）<input value={form.models} onChange={set("models")} placeholder="m1, m2, …" /></label>
           <label className="chk">
             <input type="checkbox" checked={form.make_default} onChange={set("make_default")} /> 保存后设为默认
           </label>
+        </div>
+
+        {/* 模型清单：已有=只读（接口合并语义只增不删，不放假删除）；新增=tag 输入 */}
+        <div className="models-editor">
+          {isEdit && (editing.models ?? []).length > 0 && (
+            <>
+              <p className="hint">已有模型（只读——接口限制，删除需修改服务器配置文件）：</p>
+              <ul className="chips readonly">
+                {(editing.models ?? []).map((m) => <li key={m} className="chip">{m}</li>)}
+              </ul>
+            </>
+          )}
+          <p className="hint">新增模型（输入后回车添加，可连加多个）：</p>
+          <input
+            className="search"
+            value={modelInput}
+            onChange={(e) => setModelInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addModelTag(); } }}
+            placeholder="输入模型名，回车添加"
+          />
+          {form.newModels.length > 0 && (
+            <ul className="chips">
+              {form.newModels.map((m) => (
+                <li key={m} className="chip tag-edit">
+                  {m}
+                  <button className="tag-x" onClick={() => setForm((f) => ({ ...f, newModels: f.newModels.filter((x) => x !== m) }))}>×</button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         {validateResult && (
@@ -233,7 +282,7 @@ export default function ModelConfigs() {
             {busy ? "处理中…" : "保存"}
           </button>
         </div>
-        <p className="hint">说明：端点默认模型是该厂商的标识模型；切换全局默认在列表页点对应模型即可。</p>
+        <p className="hint">说明：端点默认模型是该厂商的标识模型；切换全局默认在列表页选中模型后点「设为默认」。</p>
       </div>
     );
   }
@@ -258,13 +307,14 @@ export default function ModelConfigs() {
       {!loading && configs.length === 0 ? (
         <div className="state-block">
           <p>还没有模型配置。</p>
-          <p className="hint">点击右上「＋ 新增」添加第一个厂商端点。</p>
+          <p className="hint">点击右上「＋ 新增厂商端点」。</p>
         </div>
       ) : (
         <div className="vendors">
           {configs.map((c) => {
             const open = !!expanded[c.id];
             const models = c.models ?? [];
+            const sel = selected && selected.vendorId === c.id ? selected : null;
             return (
               <div className="vendor" key={c.id}>
                 <div className="vendor-row" onClick={() => toggleExpand(c.id)}>
@@ -272,11 +322,9 @@ export default function ModelConfigs() {
                   <span className="mono v-name">{c.name}</span>
                   <span className="mono dim v-url">{c.base_url}</span>
                   <span className="pill">
-                    {c.is_current ? (
-                      <span className="pill pill-on">● 使用中</span>
-                    ) : (
-                      <span className="pill">未激活</span>
-                    )}
+                    {c.is_current
+                      ? <span className="pill pill-on">● 使用中</span>
+                      : <span className="pill">未激活</span>}
                   </span>
                   <span className="v-ops" onClick={(e) => e.stopPropagation()}>
                     <button className="link" onClick={() => openEdit(c)} disabled={busy || !c.manage_id}
@@ -292,25 +340,39 @@ export default function ModelConfigs() {
                 </div>
 
                 {open && (
-                  <div className="vendor-models">
+                  <div className="vendor-models" onClick={(e) => e.stopPropagation()}>
                     {models.length === 0 ? (
                       <p className="hint">
                         该厂商还没有模型清单——「编辑」里手填，或保存后用「测试连接」自动发现。
                       </p>
                     ) : (
-                      <ul className="chips selectable">
-                        {models.map((m) => (
-                          <li
-                            key={m}
-                            className={isDefaultModel(c, m) ? "chip default" : "chip"}
-                            onClick={() => handleSwitchModel(c, m)}
-                            title={isDefaultModel(c, m) ? "当前默认" : "点击切换为默认"}
-                          >
-                            {m}
-                            {isDefaultModel(c, m) && <span className="chip-tag">默认</span>}
-                          </li>
-                        ))}
-                      </ul>
+                      <>
+                        <ul className="chips selectable">
+                          {models.map((m) => (
+                            <li
+                              key={m}
+                              className={[
+                                "chip",
+                                isDefaultModel(c, m) ? "default" : "",
+                                sel?.model === m ? "selected" : "",
+                              ].join(" ").trim()}
+                              onClick={() => selectModel(c, m)}
+                              title={isDefaultModel(c, m) ? "当前默认" : "点击选中，再点下方按钮设为默认"}
+                            >
+                              {m}
+                              {isDefaultModel(c, m) && <span className="chip-tag">默认</span>}
+                            </li>
+                          ))}
+                        </ul>
+                        {sel && (
+                          <div className="set-default-bar">
+                            <button onClick={handleSwitchModel} disabled={busy}>
+                              将「{sel.model}」设为默认
+                            </button>
+                            <button className="ghost" onClick={() => setSelected(null)} disabled={busy}>取消</button>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 )}
@@ -321,7 +383,7 @@ export default function ModelConfigs() {
       )}
 
       <button className="add-btn" onClick={openCreate}>＋ 新增厂商端点</button>
-      <p className="hint">切换说明：点模型 = 修改全局默认模型（影响之后的新会话）；对话中的热切换在「对话」页顶栏（待上线）。</p>
+      <p className="hint">切换说明：选中模型后点「设为默认」= 修改全局默认模型（影响之后的新会话）；对话中的热切换在「对话」页顶栏（待上线）。</p>
     </div>
   );
 }
