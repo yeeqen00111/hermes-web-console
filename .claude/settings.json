@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(python -m pip *)",
+      "Bash(python -m uvicorn *)",
+      "Bash(python -m py_compile *)",
+      "Bash(D:/application/env/conda/env/py310/python.exe *)",
+      "Bash(D:\\application\\env\\conda\\env\\py310\\python.exe *)",
+      "Bash(pip *)",
+      "Bash(uvicorn *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(curl *)",
+      "Bash(cd *)",
+      "Bash(ls *)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Read(D:/work/project/voyah-agent-dev-dir/hermes-agent/**)",
+      "Glob(D:/work/project/voyah-agent-dev-dir/hermes-agent/**)",
+      "Grep(D:/work/project/voyah-agent-dev-dir/hermes-agent/**)"
+    ],
+    "deny": [
+      "Edit(D:/work/project/voyah-agent-dev-dir/hermes-agent/**)",
+      "Write(D:/work/project/voyah-agent-dev-dir/hermes-agent/**)",
+      "NotebookEdit(D:/work/project/voyah-agent-dev-dir/hermes-agent/**)",
+      "Bash(git -C D:/work/project/voyah-agent-dev-dir/hermes-agent *)",
+      "Bash(git -C ../hermes-agent *)",
+      "Bash(rm -rf D:/work/project/voyah-agent-dev-dir/hermes-agent*)"
+    ],
+    "additionalDirectories": [
+      "D:/work/project/voyah-agent-dev-dir/hermes-agent"
+    ]
+  }
+}

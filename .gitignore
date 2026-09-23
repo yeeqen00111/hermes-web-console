@@ -1,0 +1,19 @@
+# ── 环境与凭据（绝不提交）──
+.env
+.env.local
+
+# ── 本地记忆 / AI 配置（含服务器信息，仅本机使用）──
+CLAUDE.md
+
+# ── Python ──
+__pycache__/
+*.pyc
+.venv/
+
+# ── Node / 前端 ──
+node_modules/
+dist/
+
+# ── IDE ──
+.idea/
+.vscode/
