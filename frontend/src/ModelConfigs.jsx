@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // 模型配置管理页：厂商（自定义端点）→ 模型 两级结构。
-// 删除 = 勾选（支持全选）+ 批量删除，底层为 SQLite 隐藏清单（config.yaml 不动，
+// 添加/编辑 = 弹框表单（模型ID/显示名称/最高token/思考等级）；
+// 删除 = 勾选批量或行内按钮（弹框确认），底层为 SQLite 隐藏清单（config.yaml 不动，
 // 规避 models_discovered 自动回写）。已删除的模型直接从列表消失。
-// 手动添加的模型（含显示名称/最高token/思考等级）存 SQLite custom_models 表。
 const EMPTY_FORM = {
   id: null,
   name: "",
@@ -15,6 +15,13 @@ const EMPTY_FORM = {
   context_length: "",
   discover_models: true,
   make_default: false,
+};
+
+const EMPTY_MODEL_VALUES = {
+  name: "",             // 模型 ID（厂商 API 真名）
+  display_name: "",     // 显示名称（展示用）
+  context_length: "",   // 最高 token
+  reasoning_effort: "", // 思考等级
 };
 
 function api(path, opts = {}) {
@@ -34,12 +41,7 @@ export default function ModelConfigs() {
   const [expanded, setExpanded] = useState({});          // {vendorSlug: bool}
   const [modelFilter, setModelFilter] = useState("");
   const [checked, setChecked] = useState(new Set());     // "vendor::model" 勾选集合
-  const [renaming, setRenaming] = useState(null);        // {vendorId, old, value} 行内改名
-  const [newModelName, setNewModelName] = useState("");  // 添加行：模型 ID
-  const [newDisplayName, setNewDisplayName] = useState("");  // 添加行：显示名称
-  const [newCtxLen, setNewCtxLen] = useState("");        // 添加行：最高 token
-  const [newEffort, setNewEffort] = useState("");        // 添加行：思考等级
-  const [modal, setModal] = useState(null);              // {title, msg, confirmText, onConfirm}
+  const [modal, setModal] = useState(null);              // {type:'confirm'|'model-form', ...}
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
@@ -196,47 +198,48 @@ export default function ModelConfigs() {
     }
   }
 
-  // 添加单个模型（后端合并语义，幂等）
-  async function handleAddModel(c) {
-    const name = newModelName.trim();
-    if (!name || busy) return;
-    setBusy(true);
-    try {
-      const r = await api(
-        `/api/model-configs/${encodeURIComponent(c.id)}/models`,
-        { method: "POST", body: JSON.stringify({
-          name,
-          display_name: newDisplayName.trim() || null,
-          context_length: newCtxLen ? Number(newCtxLen) : null,
-          reasoning_effort: newEffort || null,
-        }) });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) { showToast("err", `添加失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
-      showToast("ok", `已添加模型：${newDisplayName.trim() || name}`);
-      setNewModelName(""); setNewDisplayName(""); setNewCtxLen(""); setNewEffort("");
-      await load(true);
-    } catch (e) {
-      showToast("err", "添加失败：" + e.message);
-    } finally {
-      setBusy(false);
-    }
+  // ── 添加/编辑模型（弹框表单）──
+  function askAddModel(c) {
+    setModal({
+      type: "model-form", mode: "add", vendor: c, old: null,
+      values: { ...EMPTY_MODEL_VALUES },
+    });
   }
 
-  // ── 行内改名（编辑模型 ID）──
+  function askEditModel(c, m) {
+    const man = (c.manual_models ?? []).find((x) => x.model === m);
+    setModal({
+      type: "model-form", mode: "edit", vendor: c, old: m,
+      values: {
+        name: m,
+        display_name: man?.display_name ?? "",
+        context_length: man?.context_length ?? "",
+        reasoning_effort: man?.reasoning_effort ?? "",
+      },
+    });
+  }
 
-  async function handleRenameConfirm(c) {
-    const nn = (renaming?.value ?? "").trim();
-    if (!nn || nn === renaming.old || busy) { setRenaming(null); return; }
+  async function handleModelFormConfirm() {
+    const { mode, vendor, old, values } = modal;
+    const body = {
+      name: values.name.trim(),
+      display_name: values.display_name.trim() || null,
+      context_length: values.context_length ? Number(values.context_length) : null,
+      reasoning_effort: values.reasoning_effort || null,
+    };
     setBusy(true);
     try {
-      const r = await api(
-        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(renaming.old)}`,
-        { method: "PUT", body: JSON.stringify({ name: nn }) });
+      const url = mode === "edit"
+        ? `/api/model-configs/${encodeURIComponent(vendor.id)}/models/${encodeURIComponent(old)}`
+        : `/api/model-configs/${encodeURIComponent(vendor.id)}/models`;
+      const r = await api(url, { method: "PUT", body: JSON.stringify(body) });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) { showToast("err", `重命名失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
-      showToast("ok", `已重命名：${renaming.old} → ${nn}`);
-      setRenaming(null);
+      if (!r.ok) { showToast("err", `保存失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
+      showToast("ok", mode === "edit" ? `已保存：${old} → ${body.name}` : `已添加模型：${body.name}`);
+      setModal(null);
       await load(true);
+    } catch (e) {
+      showToast("err", "保存失败：" + e.message);
     } finally {
       setBusy(false);
     }
@@ -318,14 +321,59 @@ export default function ModelConfigs() {
       {modal && (
         <div className="modal-mask" onClick={() => setModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>{modal.title}</h3>
-            <p>{modal.msg}</p>
-            <div className="modal-actions">
-              <button className="ghost" onClick={() => setModal(null)}>取消</button>
-              <button className="danger-solid" onClick={modal.onConfirm} disabled={busy}>
-                {busy ? "处理中…" : modal.confirmText}
-              </button>
-            </div>
+            {modal.type === "model-form" ? (
+              <>
+                <h3>{modal.mode === "add" ? "添加模型" : "编辑模型"}</h3>
+                <p className="hint">厂商：{modal.vendor.name}</p>
+                <div className="modal-form">
+                  <label>模型 ID *
+                    <input value={modal.values.name} autoFocus
+                           onChange={(e) => setModal({ ...modal, values: { ...modal.values, name: e.target.value } })}
+                           placeholder="厂商 API 认的真名" />
+                  </label>
+                  <label>显示名称
+                    <input value={modal.values.display_name}
+                           onChange={(e) => setModal({ ...modal, values: { ...modal.values, display_name: e.target.value } })}
+                           placeholder="列表展示用（可中文）" />
+                  </label>
+                  <label>最高 token
+                    <input type="number" value={modal.values.context_length ?? ""}
+                           onChange={(e) => setModal({ ...modal, values: { ...modal.values, context_length: e.target.value } })}
+                           placeholder="可空" />
+                  </label>
+                  <label>思考等级
+                    <select value={modal.values.reasoning_effort ?? ""}
+                            onChange={(e) => setModal({ ...modal, values: { ...modal.values, reasoning_effort: e.target.value } })}>
+                      <option value="">不设置</option>
+                      <option value="minimal">minimal</option>
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                      <option value="xhigh">xhigh</option>
+                      <option value="max">max</option>
+                      <option value="ultra">ultra</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="modal-actions">
+                  <button className="ghost" onClick={() => setModal(null)} disabled={busy}>取消</button>
+                  <button onClick={handleModelFormConfirm} disabled={busy || !modal.values.name.trim()}>
+                    {busy ? "处理中…" : (modal.mode === "add" ? "添加" : "保存")}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3>{modal.title}</h3>
+                <p>{modal.msg}</p>
+                <div className="modal-actions">
+                  <button className="ghost" onClick={() => setModal(null)}>取消</button>
+                  <button className="danger-solid" onClick={modal.onConfirm} disabled={busy}>
+                    {busy ? "处理中…" : modal.confirmText}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -408,7 +456,6 @@ export default function ModelConfigs() {
                         该厂商还没有模型清单——「编辑」里手填，或保存后用「测试连接」自动发现。
                       </p>
                     ) : (
-                      <>
                       <table className="vm-table">
                         <thead>
                           <tr>
@@ -427,8 +474,7 @@ export default function ModelConfigs() {
                         <tbody>
                           {visible.map((m) => {
                             const isDefault = isDefaultModel(c, m);
-                            const isRenaming = renaming && renaming.vendorId === c.id && renaming.old === m;
-                            const manual = (c.manual_models ?? []).find((x) => x.model === m);
+                            const man = (c.manual_models ?? []).find((x) => x.model === m);
                             return (
                               <tr key={m}>
                                 <td className="col-check">
@@ -439,28 +485,13 @@ export default function ModelConfigs() {
                                   />
                                 </td>
                                 <td className="mono">
-                                  {isRenaming ? (
-                                    <input
-                                      className="cell-input"
-                                      value={renaming.value}
-                                      autoFocus
-                                      onChange={(e) => setRenaming({ ...renaming, value: e.target.value })}
-                                      onKeyDown={(e) => {
-                                        if (e.key === "Enter") handleRenameConfirm(c);
-                                        if (e.key === "Escape") setRenaming(null);
-                                      }}
-                                    />
-                                  ) : (
+                                  {man?.display_name ? (
                                     <>
-                                      {manual?.display_name ? (
-                                        <>
-                                          <div>{manual.display_name}</div>
-                                          <div className="dim" style={{ fontSize: 11 }}>{m}</div>
-                                        </>
-                                      ) : (
-                                        m
-                                      )}
+                                      <div>{man.display_name}</div>
+                                      <div className="dim" style={{ fontSize: 11 }}>{m}</div>
                                     </>
+                                  ) : (
+                                    m
                                   )}
                                 </td>
                                 <td className="ops">
@@ -475,47 +506,6 @@ export default function ModelConfigs() {
                           })}
                         </tbody>
                       </table>
-                      <div className="add-row" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          className="cell-input grow"
-                          value={newModelName}
-                          onChange={(e) => setNewModelName(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") handleAddModel(c); }}
-                          placeholder="模型 ID（厂商 API 真名）"
-                        />
-                        <input
-                          className="cell-input grow"
-                          value={newDisplayName}
-                          onChange={(e) => setNewDisplayName(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") handleAddModel(c); }}
-                          placeholder="显示名称（可选）"
-                        />
-                        <input
-                          className="cell-input narrow"
-                          type="number"
-                          value={newCtxLen}
-                          onChange={(e) => setNewCtxLen(e.target.value)}
-                          placeholder="最高token"
-                        />
-                        <select
-                          className="cell-input narrow"
-                          value={newEffort}
-                          onChange={(e) => setNewEffort(e.target.value)}
-                        >
-                          <option value="">思考等级</option>
-                          <option value="minimal">minimal</option>
-                          <option value="low">low</option>
-                          <option value="medium">medium</option>
-                          <option value="high">high</option>
-                          <option value="xhigh">xhigh</option>
-                          <option value="max">max</option>
-                          <option value="ultra">ultra</option>
-                        </select>
-                        <button className="link" onClick={() => handleAddModel(c)} disabled={busy || !newModelName.trim()}>
-                          添加
-                        </button>
-                      </div>
-                      </>
                     )}
                   </div>
                 )}
