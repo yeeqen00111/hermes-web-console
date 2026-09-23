@@ -36,6 +36,7 @@ export default function ModelConfigs() {
   const [modelInput, setModelInput] = useState("");
   const [validateResult, setValidateResult] = useState(null);
   const [expanded, setExpanded] = useState({});   // {endpoint_id: bool}
+  const [modelFilter, setModelFilter] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -63,6 +64,7 @@ export default function ModelConfigs() {
 
   function toggleExpand(id) {
     setExpanded((e) => ({ ...e, [id]: !e[id] }));
+    setModelFilter("");   // 切换展开时清过滤
   }
 
   function openCreate() {
@@ -331,8 +333,8 @@ export default function ModelConfigs() {
                   <span className="mono v-name">{c.name}</span>
                   <span className="mono dim v-url">{c.base_url}</span>
                   <span className="pill">
-                    {c.is_current
-                      ? <span className="pill pill-on">● 使用中</span>
+                    {c.is_current && current
+                      ? <span className="pill pill-on">● {current.model}</span>
                       : <span className="pill">未激活</span>}
                   </span>
                   <span className="v-ops" onClick={(e) => e.stopPropagation()}>
@@ -356,31 +358,61 @@ export default function ModelConfigs() {
                       </p>
                     ) : (
                       <>
-                        <ul className="chips selectable">
-                          {models.map((m) => {
-                            const isDefault = isDefaultModel(c, m);
-                            return (
-                              <li key={m} className={`chip${isDefault ? " default" : ""}`}>
-                                <span className="chip-name">{m}</span>
-                                {isDefault ? (
-                                  <span className="chip-tag">默认</span>
-                                ) : (
-                                  <span className="chip-actions">
-                                    <button className="chip-btn primary"
-                                            onClick={() => handleSwitchModel(c, m)} disabled={busy}>
-                                      设默认
-                                    </button>
-                                    <button className="chip-btn danger"
-                                            onClick={() => handleDeleteModel(c, m)} disabled={busy}
-                                            title="从清单删除该模型">
-                                      删
-                                    </button>
-                                  </span>
-                                )}
-                              </li>
-                            );
-                          })}
-                        </ul>
+                        <div className="vm-toolbar">
+                          <input
+                            className="vm-filter"
+                            type="search"
+                            placeholder="过滤模型…"
+                            value={modelFilter}
+                            onChange={(e) => setModelFilter(e.target.value)}
+                          />
+                          <span className="hint">
+                            {models.filter((m) => m.toLowerCase().includes(modelFilter.toLowerCase())).length} / {models.length} 个模型
+                          </span>
+                        </div>
+                        <div className="vm-table-wrap">
+                          <table className="vm-table">
+                            <thead>
+                              <tr>
+                                <th>模型</th>
+                                <th className="col-status">状态</th>
+                                <th className="col-ops">操作</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {models
+                                .filter((m) => m.toLowerCase().includes(modelFilter.toLowerCase()))
+                                .sort((a, b) => {
+                                  const aDef = isDefaultModel(c, a), bDef = isDefaultModel(c, b);
+                                  if (aDef !== bDef) return aDef ? -1 : 1;   // 默认置顶
+                                  return a.localeCompare(b);
+                                })
+                                .map((m) => {
+                                  const isDefault = isDefaultModel(c, m);
+                                  return (
+                                    <tr key={m}>
+                                      <td className="mono">{m}</td>
+                                      <td>
+                                        {isDefault
+                                          ? <span className="pill pill-on">● 当前默认</span>
+                                          : <span className="pill">可切换</span>}
+                                      </td>
+                                      <td className="ops">
+                                        {!isDefault && (
+                                          <button className="link" onClick={() => handleSwitchModel(c, m)} disabled={busy}>
+                                            设默认
+                                          </button>
+                                        )}
+                                        <button className="link danger" onClick={() => handleDeleteModel(c, m)} disabled={busy}>
+                                          删除
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                            </tbody>
+                          </table>
+                        </div>
                       </>
                     )}
                   </div>
