@@ -58,9 +58,38 @@ def _guard(resp, what: str) -> Dict[str, Any]:
 
 @router.get("", dependencies=[Depends(require_app_token)])
 def list_model_configs():
-    """列表 + 当前默认（前端摘要用）。"""
-    data = _guard(hc.request("GET", "/api/providers/custom-endpoints"), "list")
-    return {"configs": data.get("endpoints") or [], "current": data.get("current") or {}}
+    """两接口合并（2026-09-23 定案）：
+    - /api/model/options 的 custom:* providers = 主源（厂商+模型全集+is_current），实测覆盖 legacy custom_providers 段（商汤/火山都在）
+    - /api/providers/custom-endpoints = 补充管理信息（has_api_key/preview），按 host 匹配
+    """
+    options = _guard(hc.request("GET", "/api/model/options"), "options")
+    eps = _guard(hc.request("GET", "/api/providers/custom-endpoints"), "list")
+    ep_list = eps.get("endpoints") or []
+    current = eps.get("current") or {}
+
+    def host(url: str) -> str:
+        return str(url or "").split("://", 1)[-1].split("/")[0].lower()
+
+    configs = []
+    for p in (options.get("providers") or []):
+        slug = str(p.get("slug") or "")
+        if "custom" not in slug.lower():
+            continue
+        ep = next((e for e in ep_list
+                   if e.get("base_url") and host(e["base_url"]) and host(e["base_url"]) in slug), None)
+        configs.append({
+            "id": slug,                                    # 切换/设默认用（model/set 认 picker slug）
+            "manage_id": (ep or {}).get("id"),             # 编辑/删除用（custom-endpoints 体系；可能缺）
+            "name": p.get("name") or slug,
+            "base_url": (ep or {}).get("base_url") or str(p.get("api_url") or ""),
+            "models": p.get("models") or [],
+            "model": (ep or {}).get("model") or (p.get("models") or [""])[0],
+            "has_api_key": (ep or {}).get("has_api_key"),
+            "api_key_preview": (ep or {}).get("api_key_preview"),
+            "is_current": bool(p.get("is_current")),
+            "api_mode": (ep or {}).get("api_mode"),
+        })
+    return {"configs": configs, "current": current}
 
 
 @router.post("", dependencies=[Depends(require_app_token)])

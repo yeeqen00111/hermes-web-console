@@ -69,7 +69,8 @@ export default function ModelConfigs() {
 
   function openEdit(c) {
     setForm({
-      id: c.id, name: c.name ?? "", base_url: c.base_url ?? "", model: c.model ?? "",
+      id: c.manage_id,                        // 编辑/删除走 custom-endpoints 体系，用它的 id
+      name: c.name ?? "", base_url: c.base_url ?? "", model: c.model ?? "",
       api_key: "", clearKey: false,
       api_mode: c.api_mode ?? "",
       context_length: c.context_length ?? "",
@@ -155,10 +156,11 @@ export default function ModelConfigs() {
   }
 
   async function handleDelete(c) {
-    if (!window.confirm(`确定删除「${c.name}」？（id=${c.id}）`)) return;
+    if (!c.manage_id) return;
+    if (!window.confirm(`确定删除「${c.name}」？（id=${c.manage_id}）`)) return;
     setBusy(true);
     try {
-      const r = await api(`/api/model-configs/${encodeURIComponent(c.id)}`, { method: "DELETE" });
+      const r = await api(`/api/model-configs/${encodeURIComponent(c.manage_id)}`, { method: "DELETE" });
       if (!r.ok) { setError(`删除失败 HTTP ${r.status}`); return; }
       setNotice(`已删除「${c.name}」`);
       await load();
@@ -273,8 +275,15 @@ export default function ModelConfigs() {
                     )}
                   </span>
                   <span className="v-ops" onClick={(e) => e.stopPropagation()}>
-                    <button className="link" onClick={() => openEdit(c)} disabled={busy}>编辑</button>
-                    <button className="link danger" onClick={() => handleDelete(c)} disabled={busy}>删除</button>
+                    <button className="link" onClick={() => openEdit(c)} disabled={busy || !c.manage_id}
+                            title={c.manage_id ? "" : "该厂商在 legacy 配置段，暂不支持界面编辑"}>
+                      编辑
+                    </button>
+                    <button className="link danger" onClick={() => handleDelete(c)}
+                            disabled={busy || !c.manage_id}
+                            title={c.manage_id ? "" : "该厂商在 legacy 配置段，暂不支持界面删除"}>
+                      删除
+                    </button>
                   </span>
                 </div>
 
