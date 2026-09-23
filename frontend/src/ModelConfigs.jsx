@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // 模型配置管理页：厂商（自定义端点）→ 模型 两级结构。
 // 删除 = 勾选（支持全选）+ 批量删除，底层为 SQLite 隐藏清单（config.yaml 不动，
 // 规避 models_discovered 自动回写）。已删除的模型直接从列表消失。
+// 模型条目字段：模型ID（厂商真名）/ 显示名称（展示用）/ 最高token / 思考等级。
 const EMPTY_FORM = {
   id: null,
   name: "",
@@ -13,7 +14,6 @@ const EMPTY_FORM = {
   api_mode: "",
   context_length: "",
   discover_models: true,
-  newModels: [],
   make_default: false,
 };
 
@@ -30,16 +30,14 @@ export default function ModelConfigs() {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
-  const [modelInput, setModelInput] = useState("");
   const [validateResult, setValidateResult] = useState(null);
-  const [expanded, setExpanded] = useState({});          // {vendorSlug: bool}
+  const [expanded, setExpanded] = useState({});
   const [modelFilter, setModelFilter] = useState("");
-  const [checked, setChecked] = useState(new Set());     // "vendor::model" 键集合
-  const [editRow, setEditRow] = useState(null);          // {vendorId, old} 行内改名
-  const [editValue, setEditValue] = useState("");
-  const [newModelName, setNewModelName] = useState("");
-  const [modal, setModal] = useState(null);              // {type:'confirm'|'result', ...}
+  const [checked, setChecked] = useState(new Set());   // "vendor::model" 勾选集合
+  const [renaming, setRenaming] = useState(null);      // {vendorId, old, value}
+  const [modal, setModal] = useState(null);            // {title, msg, confirmText, onConfirm}
   const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
 
   const showToast = useCallback((type, msg) => {
@@ -47,8 +45,6 @@ export default function ModelConfigs() {
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), type === "ok" ? 3000 : 6000);
   }, []);
-
-  const [toast, setToast] = useState(null);
 
   const load = useCallback(async (refresh = false) => {
     setLoading(true);
@@ -77,7 +73,6 @@ export default function ModelConfigs() {
 
   function openCreate() {
     setForm(EMPTY_FORM);
-    setModelInput("");
     setValidateResult(null);
     setEditing({});
   }
@@ -90,22 +85,10 @@ export default function ModelConfigs() {
       api_mode: c.api_mode ?? "",
       context_length: c.context_length ?? "",
       discover_models: c.discover_models ?? true,
-      newModels: [],
       make_default: false,
     });
-    setModelInput("");
     setValidateResult(null);
     setEditing(c);
-  }
-
-  function addModelTag() {
-    const m = modelInput.trim();
-    if (!m) return;
-    setForm((f) => ({
-      ...f,
-      newModels: f.newModels.includes(m) ? f.newModels : [...f.newModels, m],
-    }));
-    setModelInput("");
   }
 
   function buildPayload() {
@@ -121,7 +104,6 @@ export default function ModelConfigs() {
     if (form.id) payload.id = form.id;
     if (form.clearKey) payload.api_key = "";
     else if (form.api_key.trim()) payload.api_key = form.api_key.trim();
-    if (form.newModels.length) payload.models = form.newModels;
     return payload;
   }
 
@@ -179,48 +161,6 @@ export default function ModelConfigs() {
     }
   }
 
-  // 添加单个模型（后端合并语义，幂等）
-  async function handleAddModel(c) {
-    const name = newModelName.trim();
-    if (!name || busy) return;
-    setBusy(true);
-    try {
-      const r = await api(
-        `/api/model-configs/${encodeURIComponent(c.id)}/models`,
-        { method: "POST", body: JSON.stringify({ name }) });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) { showToast("err", `添加失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
-      showToast("ok", `已添加模型：${name}`);
-      setNewModelName("");
-      await load(true);
-    } catch (e) {
-      showToast("err", "添加失败：" + e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // 行内重命名（后端 = 删旧名 + 加新名，元数据保留）
-  async function handleRename(c, oldName, newName) {
-    const nn = (newName || "").trim();
-    if (!nn || nn === oldName || busy) return;
-    setBusy(true);
-    try {
-      const r = await api(
-        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(oldName)}`,
-        { method: "PUT", body: JSON.stringify({ name: nn }) });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) { showToast("err", `重命名失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
-      showToast("ok", `已重命名：${oldName} → ${nn}`);
-      setEditRow(null);
-      await load(true);
-    } catch (e) {
-      showToast("err", "重命名失败：" + e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function handleDeleteVendor(c) {
     if (!window.confirm(`确定删除厂商「${c.name}」？`)) return;
     setBusy(true);
@@ -234,59 +174,23 @@ export default function ModelConfigs() {
     }
   }
 
-  // ── 批量删除（勾选制）──
-  const rowKey = (vendorSlug, m) => `${vendorSlug}::${m}`;
+  // ── 行内改名（编辑模型 ID）──
+  const [renaming, setRenaming] = useState(null);   // {vendorId, old, value}
+  const renameInput = useRef(null);
 
-  function toggleRow(vendorSlug, m) {
-    const k = rowKey(vendorSlug, m);
-    setChecked((prev) => {
-      const next = new Set(prev);
-      next.has(k) ? next.delete(k) : next.add(k);
-      return next;
-    });
-  }
-
-  function toggleAllVendor(c, visible) {
-    const key0 = rowKey(c.id, visible[0]);
-    const allOn = visible.every((m) => checked.has(rowKey(c.id, m)));
-    setChecked((prev) => {
-      const next = new Set(prev);
-      visible.forEach((m) => {
-        const k = rowKey(c.id, m);
-        allOn ? next.delete(k) : next.add(k);
-      });
-      return next;
-    });
-  }
-
-  async function handleBatchDelete() {
-    const items = [...checked].map((k) => {
-      const [vendorId, ...rest] = k.split("::");
-      return { vendorId, model: rest.join("::") };
-    });
-    if (items.length === 0) return;
+  async function handleRenameConfirm(c) {
+    const nn = (renaming?.value ?? "").trim();
+    if (!nn || nn === renaming.old || busy) { setRenaming(null); return; }
     setBusy(true);
-    let okCount = 0, fail = [];
     try {
-      // 按厂商分组，各组一次 hide-batch
-      const byVendor = {};
-      items.forEach(({ vendorId, model }) => {
-        (byVendor[vendorId] = byVendor[vendorId] || []).push(model);
-      });
-      for (const [vendorId, models] of Object.entries(byVendor)) {
-        const r = await api(
-          `/api/model-configs/${encodeURIComponent(vendorId)}/models/hide-batch`,
-          { method: "POST", body: JSON.stringify({ models }) });
-        if (r.ok) okCount += models.length;
-        else fail.push(vendorId);
-      }
-      setModal(null);
-      if (fail.length) showToast("err", `部分删除失败（${fail.join(", ")}）`);
-      else showToast("ok", `已删除 ${okCount} 个模型`);
-      setChecked(new Set());
+      const r = await api(
+        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(renaming.old)}`,
+        { method: "PUT", body: JSON.stringify({ name: nn }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast("err", `重命名失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
+      showToast("ok", `已重命名：${renaming.old} → ${nn}`);
+      setRenaming(null);
       await load(true);
-    } catch (e) {
-      showToast("err", "批量删除失败：" + e.message);
     } finally {
       setBusy(false);
     }
@@ -333,7 +237,6 @@ export default function ModelConfigs() {
           <label className="chk">
             <input type="checkbox" checked={form.discover_models} onChange={set("discover_models")} /> 自动发现模型
           </label>
-          <label>模型清单（逗号分隔，可空）<input value={form.models ?? ""} onChange={set("models")} placeholder="m1, m2, …" /></label>
           <label className="chk">
             <input type="checkbox" checked={form.make_default} onChange={set("make_default")} /> 保存后设为默认
           </label>
@@ -354,12 +257,11 @@ export default function ModelConfigs() {
             {busy ? "处理中…" : "保存"}
           </button>
         </div>
-        <p className="hint">说明：端点默认模型是该厂商的标识模型；切换全局默认在列表页勾选后点「删除所选」。</p>
       </div>
     );
   }
 
-  // ── 列表视图（厂商 → 模型，勾选批量删除）──
+  // ── 列表视图 ──
   const filter = modelFilter.trim().toLowerCase();
 
   const visibleFor = (c) => {
@@ -374,15 +276,67 @@ export default function ModelConfigs() {
     return new Set(c.hidden_models ?? []);
   }
 
+  function toggleRow(vendorSlug, m) {
+    const k = `${vendorSlug}::${m}`;
+    setChecked((prev) => {
+      const next = new Set(prev);
+      next.has(k) ? next.delete(k) : next.add(k);
+      return next;
+    });
+  }
+
+  function toggleAllVendor(c, visible) {
+    const keys = visible.map((m) => `${c.id}::${m}`);
+    const allOn = keys.every((k) => checked.has(k));
+    setChecked((prev) => {
+      const next = new Set(prev);
+      keys.forEach((k) => (allOn ? next.delete(k) : next.add(k)));
+      return next;
+    });
+  }
+
+  async function handleBatchDelete() {
+    const items = [...checked].map((k) => {
+      const [vendorId, ...rest] = k.split("::");
+      return { vendorId, model: rest.join("::") };
+    });
+    if (items.length === 0) return;
+    setBusy(true);
+    let okCount = 0;
+    const fails = [];
+    try {
+      const byVendor = {};
+      items.forEach(({ vendorId, model }) => {
+        (byVendor[vendorId] = byVendor[vendorId] || []).push(model);
+      });
+      for (const [vendorId, models] of Object.entries(byVendor)) {
+        const r = await api(
+          `/api/model-configs/${encodeURIComponent(vendorId)}/models/hide-batch`,
+          { method: "POST", body: JSON.stringify({ models }) });
+        if (r.ok) okCount += models.length;
+        else fails.push(vendorId);
+      }
+      setModal(null);
+      if (fails.length) showToast("err", `部分删除失败（${fails.join(", ")}）`);
+      else showToast("ok", `已删除 ${okCount} 个模型`);
+      setChecked(new Set());
+      await load(true);
+    } catch (e) {
+      showToast("err", "批量删除失败：" + e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const totalVisible = configs.reduce((n, c) => n + visibleFor(c).length, 0);
-  const checkedCount = [...checked].length;
+  const checkedCount = checked.size;
 
   return (
     <div className="page">
       {toast && <div className={`toast ${toast.type}`}>{toast.msg}</div>}
       {modal && (
         <div className="modal-mask" onClick={() => setModal(null)}>
-          <div className="modal">
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h3>{modal.title}</h3>
             <p>{modal.msg}</p>
             <div className="modal-actions">
@@ -441,8 +395,8 @@ export default function ModelConfigs() {
           {configs.map((c) => {
             const open = !!expanded[c.id];
             const visible = visibleFor(c);
-            const allChecked = visible.length > 0 && visible.every((m) => checked.has(rowKey(c.id, m)));
-            const someChecked = visible.some((m) => checked.has(rowKey(c.id, m)));
+            const allChecked = visible.length > 0 && visible.every((m) => checked.has(`${c.id}::${m}`));
+            const someChecked = visible.some((m) => checked.has(`${c.id}::${m}`));
             return (
               <div className="vendor" key={c.id}>
                 <div className="vendor-row" onClick={() => toggleExpand(c.id)}>
@@ -468,106 +422,60 @@ export default function ModelConfigs() {
 
                 {open && (
                   <div className="vendor-models" onClick={(e) => e.stopPropagation()}>
-                    <div className="vm-toolbar">
-                      <input
-                        className="vm-filter"
-                        type="search"
-                        placeholder="过滤模型…"
-                        value={modelFilter}
-                        onChange={(e) => setModelFilter(e.target.value)}
-                      />
-                      <span className="hint">{visible.length} 个模型</span>
-                    </div>
-                    <table className="vm-table">
-                      <thead>
-                        <tr>
-                          <th className="col-check">
-                            <input
-                              type="checkbox"
-                              checked={visible.length > 0 && visible.every((m) => checked.has(rowKey(c.id, m)))}
-                              onChange={() => {
-                                const keys = visible.map((m) => rowKey(c.id, m));
-                                const allOn = keys.every((k) => checked.has(k));
-                                setChecked((prev) => {
-                                  const next = new Set(prev);
-                                  keys.forEach((k) => (allOn ? next.delete(k) : next.add(k)));
-                                  return next;
-                                });
-                              }}
-                            />
-                          </th>
-                          <th>模型</th>
-                          <th className="col-ops">操作</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {visible.map((m) => {
-                          const isDefault = isDefaultModel(c, m);
-                          const editingRow = editRow && editRow.vendorId === c.id && editRow.old === m;
-                          return (
-                            <tr key={m}>
-                              <td className="col-check">
-                                <input
-                                  type="checkbox"
-                                  checked={checked.has(rowKey(c.id, m))}
-                                  onChange={() => toggleRow(c.id, m)}
-                                />
-                              </td>
-                              <td className="mono">
-                                {editingRow ? (
+                    {visible.length === 0 ? (
+                      <p className="hint">
+                        该厂商还没有模型清单——「编辑」里手填，或保存后用「测试连接」自动发现。
+                      </p>
+                    ) : (
+                      <table className="vm-table">
+                        <thead>
+                          <tr>
+                            <th className="col-check">
+                              <input
+                                type="checkbox"
+                                checked={allChecked}
+                                ref={(el) => { if (el) el.indeterminate = someChecked && !allChecked; }}
+                                onChange={() => toggleAllVendor(c, visible)}
+                              />
+                            </th>
+                            <th>模型</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visible.map((m) => {
+                            const isDefault = isDefaultModel(c, m);
+                            const isRenaming = renaming && renaming.vendorId === c.id && renaming.old === m;
+                            return (
+                              <tr key={m}>
+                                <td className="col-check">
                                   <input
-                                    className="cell-input"
-                                    value={editValue}
-                                    autoFocus
-                                    onChange={(e) => setEditValue(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Enter") handleRename(c, m, editValue);
-                                      if (e.key === "Escape") setEditRow(null);
-                                    }}
+                                    type="checkbox"
+                                    checked={checked.has(`${c.id}::${m}`)}
+                                    onChange={() => toggleRow(c.id, m)}
                                   />
-                                ) : (
-                                  m
-                                )}
-                              </td>
-                              <td className="ops">
-                                {editingRow ? (
-                                  <>
-                                    <button className="link" onClick={() => handleRename(c, m, editValue)} disabled={busy || !editValue.trim()}>
-                                      保存
-                                    </button>
-                                    <button className="link" onClick={() => setEditRow(null)}>取消</button>
-                                  </>
-                                ) : (
-                                  <>
-                                    {isDefault && <span className="pill pill-on">默认</span>}
-                                    <button className="link" onClick={() => { setEditRow({ vendorId: c.id, old: m }); setEditValue(m); }} disabled={busy}>
-                                      编辑
-                                    </button>
-                                  </>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                        <tr>
-                          <td className="col-check"></td>
-                          <td>
-                            <input
-                              className="cell-input"
-                              value={newModelName}
-                              onChange={(e) => setNewModelName(e.target.value)}
-                              onKeyDown={(e) => { if (e.key === "Enter") handleAddModel(c); }}
-                              placeholder="新模型名，回车添加"
-                            />
-                          </td>
-                          <td className="ops">
-                            <button className="link" onClick={() => handleAddModel(c)} disabled={busy || !newModelName.trim()}>
-                              添加
-                            </button>
-                          </td>
-                        </tr>
-                      </tbody>
-                    </table>
+                                </td>
+                                <td className="mono">
+                                  {isRenaming ? (
+                                    <input
+                                      className="cell-input"
+                                      value={renaming.value}
+                                      autoFocus
+                                      onChange={(e) => setRenaming({ ...renaming, value: e.target.value })}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") handleRenameConfirm(c);
+                                        if (e.key === "Escape") setRenaming(null);
+                                      }}
+                                    />
+                                  ) : (
+                                    m
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
                   </div>
                 )}
               </div>
