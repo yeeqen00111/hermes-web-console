@@ -35,6 +35,10 @@ export default function ModelConfigs() {
   const [modelFilter, setModelFilter] = useState("");
   const [checked, setChecked] = useState(new Set());     // "vendor::model" 勾选集合
   const [renaming, setRenaming] = useState(null);        // {vendorId, old, value} 行内改名
+  const [newModelName, setNewModelName] = useState("");  // 添加行：模型 ID
+  const [newDisplayName, setNewDisplayName] = useState("");  // 添加行：显示名称
+  const [newCtxLen, setNewCtxLen] = useState("");        // 添加行：最高 token
+  const [newEffort, setNewEffort] = useState("");        // 添加行：思考等级
   const [modal, setModal] = useState(null);              // {title, msg, confirmText, onConfirm}
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
@@ -192,6 +196,32 @@ export default function ModelConfigs() {
     }
   }
 
+  // 添加单个模型（后端合并语义，幂等）
+  async function handleAddModel(c) {
+    const name = newModelName.trim();
+    if (!name || busy) return;
+    setBusy(true);
+    try {
+      const r = await api(
+        `/api/model-configs/${encodeURIComponent(c.id)}/models`,
+        { method: "POST", body: JSON.stringify({
+          name,
+          display_name: newDisplayName.trim() || null,
+          context_length: newCtxLen ? Number(newCtxLen) : null,
+          reasoning_effort: newEffort || null,
+        }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast("err", `添加失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
+      showToast("ok", `已添加模型：${newDisplayName.trim() || name}`);
+      setNewModelName(""); setNewDisplayName(""); setNewCtxLen(""); setNewEffort("");
+      await load(true);
+    } catch (e) {
+      showToast("err", "添加失败：" + e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // ── 行内改名（编辑模型 ID）──
 
   async function handleRenameConfirm(c) {
@@ -272,10 +302,10 @@ export default function ModelConfigs() {
 
   function visibleFor(c) {
     const models = (c.models ?? []).filter((m) => !hiddenSet(c).has(m));
-    if (!filter) return models;
+    if (!modelFilter) return models;
     return models.filter((m) =>
-      m.toLowerCase().includes(filter) ||
-      String(c.name ?? "").toLowerCase().includes(filter));
+      m.toLowerCase().includes(modelFilter.toLowerCase()) ||
+      String(c.name ?? "").toLowerCase().includes(modelFilter.toLowerCase()));
   }
 
   function hiddenSet(c) {
@@ -378,6 +408,7 @@ export default function ModelConfigs() {
                         该厂商还没有模型清单——「编辑」里手填，或保存后用「测试连接」自动发现。
                       </p>
                     ) : (
+                      <>
                       <table className="vm-table">
                         <thead>
                           <tr>
@@ -397,6 +428,7 @@ export default function ModelConfigs() {
                           {visible.map((m) => {
                             const isDefault = isDefaultModel(c, m);
                             const isRenaming = renaming && renaming.vendorId === c.id && renaming.old === m;
+                            const manual = (c.manual_models ?? []).find((x) => x.model === m);
                             return (
                               <tr key={m}>
                                 <td className="col-check">
@@ -419,7 +451,16 @@ export default function ModelConfigs() {
                                       }}
                                     />
                                   ) : (
-                                    m
+                                    <>
+                                      {manual?.display_name ? (
+                                        <>
+                                          <div>{manual.display_name}</div>
+                                          <div className="dim" style={{ fontSize: 11 }}>{m}</div>
+                                        </>
+                                      ) : (
+                                        m
+                                      )}
+                                    </>
                                   )}
                                 </td>
                                 <td className="ops">
@@ -434,6 +475,47 @@ export default function ModelConfigs() {
                           })}
                         </tbody>
                       </table>
+                      <div className="add-row" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          className="cell-input grow"
+                          value={newModelName}
+                          onChange={(e) => setNewModelName(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") handleAddModel(c); }}
+                          placeholder="模型 ID（厂商 API 真名）"
+                        />
+                        <input
+                          className="cell-input grow"
+                          value={newDisplayName}
+                          onChange={(e) => setNewDisplayName(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") handleAddModel(c); }}
+                          placeholder="显示名称（可选）"
+                        />
+                        <input
+                          className="cell-input narrow"
+                          type="number"
+                          value={newCtxLen}
+                          onChange={(e) => setNewCtxLen(e.target.value)}
+                          placeholder="最高token"
+                        />
+                        <select
+                          className="cell-input narrow"
+                          value={newEffort}
+                          onChange={(e) => setNewEffort(e.target.value)}
+                        >
+                          <option value="">思考等级</option>
+                          <option value="minimal">minimal</option>
+                          <option value="low">low</option>
+                          <option value="medium">medium</option>
+                          <option value="high">high</option>
+                          <option value="xhigh">xhigh</option>
+                          <option value="max">max</option>
+                          <option value="ultra">ultra</option>
+                        </select>
+                        <button className="link" onClick={() => handleAddModel(c)} disabled={busy || !newModelName.trim()}>
+                          添加
+                        </button>
+                      </div>
+                      </>
                     )}
                   </div>
                 )}
