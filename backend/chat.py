@@ -11,12 +11,11 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
-import os
 from typing import Any, Callable
 
 import websockets
 
-HERMES_BASE = os.environ.get("HERMES_BASE", "http://localhost:8426")
+from config import HERMES_BASE
 
 # server→client 请求（agent 问你问题）；demo 阶段统一取消，避免 agent 半路干等。
 _SERVER_REQUEST_METHODS = frozenset({
