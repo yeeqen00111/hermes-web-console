@@ -199,10 +199,10 @@ export default function ModelConfigs() {
   }
 
   // ── 添加/编辑模型（弹框表单）──
-  function askAddModel() {
+  function askAddModel(c) {
     setModal({
-      type: "model-form", mode: "add", vendor: null,
-      vendorSlug: configs[0]?.id ?? "",
+      type: "model-form", mode: "add",
+      vendor: c ?? null, vendorSlug: c?.id ?? "",
       values: { ...EMPTY_MODEL_VALUES },
     });
   }
@@ -328,19 +328,7 @@ export default function ModelConfigs() {
             {modal.type === "model-form" ? (
               <>
                 <h3>{modal.mode === "add" ? "添加模型" : "编辑模型"}</h3>
-                {modal.mode === "add" && configs.length > 0 && (
-                  <label className="modal-field">
-                    厂商 *
-                    <select
-                      value={modal.vendorSlug ?? ""}
-                      onChange={(e) => setModal({ ...modal, vendorSlug: e.target.value })}
-                    >
-                      {configs.map((c) => (
-                        <option key={c.id} value={c.id}>{c.name || c.id}</option>
-                      ))}
-                    </select>
-                  </label>
-                )}
+                <p className="hint">厂商：{modal.vendor?.name ?? modal.vendorSlug ?? "—"}</p>
                 <div className="modal-form">
                   <label>模型 ID *
                     <input value={modal.values.name} autoFocus
@@ -463,6 +451,7 @@ export default function ModelConfigs() {
                     <span className="pill pill-on">● {current.model}</span>
                   )}
                   <span className="v-ops" onClick={(e) => e.stopPropagation()}>
+                    <button className="link" onClick={() => askAddModel(c)} disabled={busy}>＋ 模型</button>
                     <button className="link" onClick={() => openEdit(c)} disabled={busy}>编辑</button>
                     <button className="link danger" onClick={() => handleDeleteVendor(c)} disabled={busy}>删除</button>
                   </span>
