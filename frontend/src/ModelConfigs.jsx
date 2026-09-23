@@ -332,7 +332,14 @@ export default function ModelConfigs() {
                 <div className="modal-form">
                   <label>模型 ID *
                     <input value={modal.values.name} autoFocus
-                           onChange={(e) => setModal({ ...modal, values: { ...modal.values, name: e.target.value } })}
+                           onChange={(e) => {
+                             const v = e.target.value;
+                             const follow = !modal.values.display_name || modal.values.display_name === modal.values.name;
+                             setModal({ ...modal, values: {
+                               ...modal.values, name: v,
+                               display_name: follow ? v : modal.values.display_name,
+                             } });
+                           }}
                            placeholder="厂商 API 认的真名" />
                   </label>
                   <label>显示名称
@@ -475,7 +482,8 @@ export default function ModelConfigs() {
                                 onChange={() => toggleAllVendor(c, visible)}
                               />
                             </th>
-                            <th>模型</th>
+                            <th>显示名称</th>
+                            <th>模型 ID</th>
                             <th className="col-ops">操作</th>
                           </tr>
                         </thead>
@@ -492,16 +500,8 @@ export default function ModelConfigs() {
                                     onChange={() => toggleRow(c.id, m)}
                                   />
                                 </td>
-                                <td className="mono">
-                                  {man?.display_name ? (
-                                    <>
-                                      <div>{man.display_name}</div>
-                                      <div className="dim" style={{ fontSize: 11 }}>{m}</div>
-                                    </>
-                                  ) : (
-                                    m
-                                  )}
-                                </td>
+                                <td>{man?.display_name || m}</td>
+                                <td className="mono dim">{m}</td>
                                 <td className="ops">
                                   {!isDefault && (
                                     <>

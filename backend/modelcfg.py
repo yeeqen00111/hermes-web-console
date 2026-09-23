@@ -400,6 +400,9 @@ def rename_vendor_model(vendor_id: str, model_id: str, body: AddModelBody):
         add_custom(vendor_id, new_name, display_name, ctx_len, effort)
     # 编辑 = 关注该模型 → 自动取消隐藏（否则前端过滤掉看不到改动）
     _unhide(vendor_id, new_name)
+    # 改名：旧名隐藏（config/discovery 侧旧条目无法删除，隐藏即从列表消失）
+    if new_name != model_id:
+        _hide(vendor_id, model_id)
 
     # 默认模型跟随改名（SQLite 标记 + config model 段）
     d = hidden_store.get_default()
