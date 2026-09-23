@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 
 // 模型配置管理页：厂商（自定义端点）→ 模型 两级结构。
-// 交互原则：浏览（chip 点击=选中）与操作（显式「设为默认」按钮）分离，防误触。
-// 模型清单：已有模型只读（upsert 合并语义只增不删，界面不放假删除）；新增走 tag 输入。
+// 每个模型项常显操作：设默认（model/set）+ 删除（PUT /api/config 整列表替换 legacy 段）。
+// 模型清单新增走表单 tag 输入（upsert 合并语义）。
 const EMPTY_FORM = {
   id: null,
   name: "",
+  
   base_url: "",
   model: "",
   api_key: "",
@@ -35,7 +36,6 @@ export default function ModelConfigs() {
   const [modelInput, setModelInput] = useState("");
   const [validateResult, setValidateResult] = useState(null);
   const [expanded, setExpanded] = useState({});   // {endpoint_id: bool}
-  const [selected, setSelected] = useState(null); // {vendorId, model} 本地选中态，未生效
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -63,12 +63,6 @@ export default function ModelConfigs() {
 
   function toggleExpand(id) {
     setExpanded((e) => ({ ...e, [id]: !e[id] }));
-    setSelected(null);   // 收起/切换厂商时清掉未生效的选中态
-  }
-
-  function selectModel(c, m) {
-    if (isDefaultModel(c, m)) return;    // 已是默认，无需选择
-    setSelected({ vendorId: c.id, model: m });
   }
 
   function openCreate() {
@@ -157,20 +151,36 @@ export default function ModelConfigs() {
     }
   }
 
-  // 显式按钮触发：切换全局默认模型
-  async function handleSwitchModel() {
-    if (!selected) return;
+  // 常显按钮：设为默认 / 删除（用户要求每项操作始终可见，不藏在交互后）
+  async function handleSwitchModel(c, m) {
+    if (isDefaultModel(c, m)) return;
     setBusy(true);
     setError(""); setNotice("");
     try {
       const r = await api(
-        `/api/model-configs/${encodeURIComponent(selected.vendorId)}/default?model=${encodeURIComponent(selected.model)}`,
+        `/api/model-configs/${encodeURIComponent(c.id)}/default?model=${encodeURIComponent(m)}`,
         { method: "POST" });
       const d = await r.json().catch(() => ({}));
       if (d.confirm_required) { setError(`需要确认：${d.confirm_message}`); return; }
       if (!r.ok) { setError(`切换失败 HTTP ${r.status}`); return; }
-      setNotice(`默认模型已切换：${selected.model}`);
-      setSelected(null);
+      setNotice(`默认模型已切换：${m}`);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteModel(c, m) {
+    if (!window.confirm(`从「${c.name}」的清单里删除模型「${m}」？`)) return;
+    setBusy(true);
+    setError(""); setNotice("");
+    try {
+      const r = await api(
+        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(m)}`,
+        { method: "DELETE" });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { setError(`删除失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
+      setNotice(`已删除模型：${m}`);
       await load();
     } finally {
       setBusy(false);
@@ -314,7 +324,6 @@ export default function ModelConfigs() {
           {configs.map((c) => {
             const open = !!expanded[c.id];
             const models = c.models ?? [];
-            const sel = selected && selected.vendorId === c.id ? selected : null;
             return (
               <div className="vendor" key={c.id}>
                 <div className="vendor-row" onClick={() => toggleExpand(c.id)}>
@@ -349,30 +358,23 @@ export default function ModelConfigs() {
                       <>
                         <ul className="chips selectable">
                           {models.map((m) => {
-                            const isSelected = sel?.model === m;
+                            const isDefault = isDefaultModel(c, m);
                             return (
-                              <li
-                                key={m}
-                                className={[
-                                  "chip",
-                                  isDefaultModel(c, m) ? "default" : "",
-                                  isSelected ? "selected" : "",
-                                ].join(" ").trim()}
-                                onClick={() => selectModel(c, m)}
-                                title={isDefaultModel(c, m) ? "当前默认" : "点击选中"}
-                              >
+                              <li key={m} className={`chip${isDefault ? " default" : ""}`}>
                                 <span className="chip-name">{m}</span>
-                                {isDefaultModel(c, m) && <span className="chip-tag">默认</span>}
-                                {isSelected && (
-                                  <span className="chip-actions" onClick={(e) => e.stopPropagation()}>
-                                    <button
-                                      className="chip-btn primary"
-                                      onClick={() => handleSwitchModel()}
-                                      disabled={busy}
-                                    >
-                                      设为默认
+                                {isDefault ? (
+                                  <span className="chip-tag">默认</span>
+                                ) : (
+                                  <span className="chip-actions">
+                                    <button className="chip-btn primary"
+                                            onClick={() => handleSwitchModel(c, m)} disabled={busy}>
+                                      设默认
                                     </button>
-                                    <button className="chip-btn" onClick={() => setSelected(null)}>×</button>
+                                    <button className="chip-btn danger"
+                                            onClick={() => handleDeleteModel(c, m)} disabled={busy}
+                                            title="从清单删除该模型">
+                                      删
+                                    </button>
                                   </span>
                                 )}
                               </li>

@@ -132,6 +132,37 @@ def set_default_model(endpoint_id: str, model: str):
     return {"ok": True}
 
 
+@router.delete("/{vendor_id}/models/{model_id}", dependencies=[Depends(require_app_token)])
+def delete_vendor_model(vendor_id: str, model_id: str):
+    """从厂商模型清单删除一项（真删除）。
+
+    原理：用户的厂商在 legacy custom_providers 段（list），PUT /api/config 的深合并
+    对 list 是整体替换 → 回写「完整列表减去该项」即删除。默认模型不允许删（先切换）。
+    """
+    cfg = _guard(hc.request("GET", "/api/config"), "config-read")
+    cps = cfg.get("custom_providers")
+    if not isinstance(cps, list):
+        raise HTTPException(status_code=404,
+                            detail="服务器配置没有 custom_providers 段（该厂商可能不在 legacy 段，暂不支持）")
+    # vendor_id 形如 custom:<host>；legacy entry 按 name.lower() 对应（实测一致）
+    bare = vendor_id.removeprefix("custom:").lower()
+    target = next((e for e in cps
+                   if isinstance(e, dict) and str(e.get("name", "")).lower() == bare), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"custom_providers 里找不到厂商 {vendor_id}")
+    models = target.get("models")
+    if not isinstance(models, dict) or model_id not in models:
+        raise HTTPException(status_code=404, detail=f"厂商 {target.get('name')} 的清单里没有 {model_id}")
+    if str(target.get("model")) == model_id:
+        raise HTTPException(status_code=400,
+                            detail=f"{model_id} 是该厂商的默认模型，请先切换到其他模型再删除")
+
+    models.pop(model_id)
+    target["models"] = models
+    return _guard(hc.request("PUT", "/api/config",
+                             json={"config": {"custom_providers": cps}}), "config-write")
+
+
 @router.delete("/{endpoint_id}", dependencies=[Depends(require_app_token)])
 def delete_model_config(endpoint_id: str):
     return _guard(hc.request(
