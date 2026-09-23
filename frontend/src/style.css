@@ -72,3 +72,25 @@ td.num { text-align: right; }
 .chat-input-row { display: flex; gap: 8px; margin: 8px 0 16px; }
 .chat-input-row .search { margin: 0; flex: 1; }
 .chat-input-row button { white-space: nowrap; }
+
+/* ── 模型配置管理 ────────────────────────────────── */
+.form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; margin: 18px 0; }
+.form label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #5b6370; }
+.form input, .form select { font-size: 14px; padding: 9px 12px; border-radius: 8px; border: 1px solid #d5d9de; }
+.form input:focus, .form select:focus { outline: 2px solid #bfd0ff; border-color: #2160f3; }
+.form .chk { flex-direction: row; align-items: center; gap: 8px; user-select: none; cursor: pointer; }
+.form-actions { display: flex; gap: 10px; margin-top: 6px; }
+
+.ok-line { color: #2f8a4d; font-size: 14px; }
+.pill { font-size: 12px; color: #8a9199; white-space: nowrap; }
+.pill-on { color: #2f8a4d; }
+
+button.link { background: none; border: none; padding: 2px 6px; color: #2160f3; cursor: pointer; font-size: 13px; }
+button.link:hover { text-decoration: underline; background: none; }
+button.link.danger { color: #d4382d; }
+td.ops { white-space: nowrap; }
+.col-status { width: 90px; }
+.col-ops { width: 160px; }
+
+.add-btn { margin-top: 18px; width: 100%; padding: 10px; font-size: 14px; border: 1px dashed #9fb4d8; border-radius: 10px; background: #f8faff; color: #2160f3; cursor: pointer; }
+.add-btn:hover { background: #eef3ff; }
