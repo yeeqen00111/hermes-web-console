@@ -118,19 +118,43 @@ def _vendor_row(doc: Dict[str, Any], e: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.get("", dependencies=[Depends(require_app_token)])
-def list_model_configs():
-    """厂商列表：直读磁盘原文（用户在服务器手改立即反映，零缓存）。"""
-    doc = _load_doc()
-    rows = [_vendor_row(doc, e) for e in _all_vendor_entries(doc)]
-    model_cfg = doc.get("model") or {}
-    return {
-        "configs": rows,
-        "current": {
-            "provider": str(model_cfg.get("provider", "") or ""),
-            "model": str(model_cfg.get("default", "") or ""),
-            "base_url": str(model_cfg.get("base_url", "") or ""),
-        },
-    }
+def list_model_configs(refresh: bool = False):
+    """厂商列表（2026-09-23 调研定案）：主源 = /api/model/options 的 custom:* providers。
+
+    数据链（源码确认）：load_picker_context → get_compatible_custom_providers(cfg)
+    = custom_providers 字段的官方合并视图（legacy 段 + providers 段），含 discovery
+    融合的模型名与 is_current 语义。refresh=false（默认）只探测当前厂商、其余走 1h
+    磁盘缓存（快）；refresh=true 探测全部并破缓存（慢但强同步——服务器手改后用这个）。
+    /api/providers/custom-endpoints 仅补充 key 管理信息（按 host 匹配）。
+    """
+    options = _raw_ok(hc.request("GET", f"/api/model/options?refresh={'true' if refresh else 'false'}"), "options")
+    eps = _raw_ok(hc.request("GET", "/api/providers/custom-endpoints"), "list")
+    ep_list = eps.get("endpoints") or []
+    current = eps.get("current") or {}
+
+    def host(url: str) -> str:
+        return str(url or "").split("://", 1)[-1].split("/")[0].lower()
+
+    configs = []
+    for p in (options.get("providers") or []):
+        slug = str(p.get("slug") or "")
+        if "custom" not in slug.lower():
+            continue
+        ep = next((e for e in ep_list
+                   if e.get("base_url") and host(e["base_url"]) and host(e["base_url"]) in slug), None)
+        configs.append({
+            "id": slug,                                    # 切换/设默认用（model/set 认 picker slug）
+            "manage_id": (ep or {}).get("id"),             # 编辑/删除用（custom-endpoints 体系；可能缺）
+            "name": p.get("name") or slug,
+            "base_url": (ep or {}).get("base_url") or str(p.get("api_url") or ""),
+            "models": p.get("models") or [],
+            "model": (ep or {}).get("model") or (p.get("models") or [""])[0],
+            "has_api_key": (ep or {}).get("has_api_key"),
+            "api_key_preview": (ep or {}).get("api_key_preview"),
+            "is_current": bool(p.get("is_current")),
+            "api_mode": (ep or {}).get("api_mode"),
+        })
+    return {"configs": configs, "current": current}
 
 
 def _apply_vendor_fields(entry: Dict[str, Any], body: ModelConfigBody) -> None:
