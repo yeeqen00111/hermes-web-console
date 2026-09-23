@@ -24,14 +24,63 @@ def _conn() -> sqlite3.Connection:
         "vendor TEXT NOT NULL, model TEXT NOT NULL, "
         "display_name TEXT, "
         "context_length INTEGER, reasoning_effort TEXT, "
+        "is_default INTEGER NOT NULL DEFAULT 0, "
         "created_at TEXT DEFAULT CURRENT_TIMESTAMP, "
         "PRIMARY KEY (vendor, model))"
     )
-    # 旧库迁移：补 display_name 列
+    # 旧库迁移：补 display_name / is_default 列
     cols = [r[1] for r in conn.execute("PRAGMA table_info(custom_models)")]
     if "display_name" not in cols:
         conn.execute("ALTER TABLE custom_models ADD COLUMN display_name TEXT")
+    if "is_default" not in cols:
+        conn.execute("ALTER TABLE custom_models ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
     return conn
+
+
+def set_default(vendor_slug: str, model: str,
+                display_name=None, context_length=None, reasoning_effort=None) -> None:
+    """把 (vendor, model) 标记为当前默认：先清全表标记，再确保条目存在并置位。"""
+    conn = _conn()
+    try:
+        conn.execute("UPDATE custom_models SET is_default = 0")
+        row = conn.execute(
+            "SELECT 1 FROM custom_models WHERE vendor = ? AND model = ?",
+            (vendor_slug, model),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO custom_models (vendor, model, display_name, context_length, "
+                "reasoning_effort, is_default) VALUES (?, ?, ?, ?, ?, 1)",
+                (vendor_slug, model, display_name, context_length, reasoning_effort),
+            )
+        else:
+            conn.execute(
+                "UPDATE custom_models SET is_default = 1 WHERE vendor = ? AND model = ?",
+                (vendor_slug, model),
+            )
+        conn.execute(
+            "DELETE FROM hidden_models WHERE vendor = ? AND model = ?",
+            (vendor_slug, model),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_default():
+    """当前默认条目（{vendor, model, ...}）或 None。"""
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT vendor, model, display_name, context_length, reasoning_effort "
+            "FROM custom_models WHERE is_default = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return {"vendor": row[0], "model": row[1], "display_name": row[2],
+                "context_length": row[3], "reasoning_effort": row[4]}
+    finally:
+        conn.close()
 
 
 def hidden_set(vendor_slug: str) -> set:
