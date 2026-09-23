@@ -37,9 +37,8 @@ export default function ModelConfigs() {
   const [modelFilter, setModelFilter] = useState("");
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);       // {type:'ok'|'err', msg}
-  const [pendingDelete, setPendingDelete] = useState(null); // {vendorId, model} 行内确认
+  const [modal, setModal] = useState(null);       // {type:'confirm', vendor, model} | {type:'result', ok, msg}
   const toastTimer = useRef(null);
-  const delTimer = useRef(null);
 
   const showToast = useCallback((type, msg) => {
     setToast({ type, msg });
@@ -47,23 +46,10 @@ export default function ModelConfigs() {
     toastTimer.current = setTimeout(() => setToast(null), type === "ok" ? 3000 : 6000);
   }, []);
 
-  function armDelete(c, m) {
-    // 行内二次确认：第一次点变「确认删除」，3 秒未点自动还原
-    if (pendingDelete && pendingDelete.vendorId === c.id && pendingDelete.model === m) {
-      clearTimeout(delTimer.current);
-      setPendingDelete(null);
-      handleDeleteModel(c, m);
-      return;
-    }
-    setPendingDelete({ vendorId: c.id, model: m });
-    clearTimeout(delTimer.current);
-    delTimer.current = setTimeout(() => setPendingDelete(null), 3000);
-  }
-
-  const load = useCallback(async () => {
+  const load = useCallback(async (refresh = false) => {
     setLoading(true);
     try {
-      const r = await api("/api/model-configs");
+      const r = await api(`/api/model-configs${refresh ? "?refresh=true" : ""}`);
       if (!r.ok) { showToast("err", `加载失败 HTTP ${r.status}`); return; }
       const d = await r.json();
       setConfigs(d.configs ?? []);
@@ -166,7 +152,7 @@ export default function ModelConfigs() {
       if (!r.ok) { showToast("err", `保存失败 HTTP ${r.status}: ${d.detail ?? ""}`); return; }
       showToast("ok", form.id ? "已保存" : `已创建（id=${d.endpoint_id}）`);
       setEditing(null);
-      await load();
+      await load(true);
     } finally {
       setBusy(false);
     }
@@ -184,7 +170,7 @@ export default function ModelConfigs() {
       if (d.confirm_required) { showToast("err", `需要确认：${d.confirm_message}`); return; }
       if (!r.ok) { showToast("err", `切换失败 HTTP ${r.status}`); return; }
       showToast("ok", `默认模型已切换：${m}`);
-      await load();
+      await load(true);
     } catch (e) {
       showToast("err", "切换失败：" + e.message);
     } finally {
@@ -192,18 +178,24 @@ export default function ModelConfigs() {
     }
   }
 
-  async function handleDeleteModel(c, m) {
+  // 删除：弹框确认 → 执行 → 弹框反馈（用户定案的交互）
+  function askDeleteModel(c, m) {
+    setModal({ type: "confirm", vendor: c, model: m });
+  }
+
+  async function handleDeleteModel() {
+    const { vendor, model } = modal;
     setBusy(true);
     try {
       const r = await api(
-        `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(m)}`,
+        `/api/model-configs/${encodeURIComponent(vendor.id)}/models/${encodeURIComponent(model)}`,
         { method: "DELETE" });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) { showToast("err", `删除失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
-      showToast("ok", `已删除模型：${m}`);
-      await load();
+      const ok = r.ok;
+      setModal({ type: "result", ok, msg: ok ? `已从「${vendor.name}」删除模型：${model}` : (d.detail ?? `HTTP ${r.status}`) });
+      if (ok) await load(true);   // 写操作后强制破 picker 缓存刷新
     } catch (e) {
-      showToast("err", "删除失败：" + e.message);
+      setModal({ type: "result", ok: false, msg: "删除失败：" + e.message });
     } finally {
       setBusy(false);
     }
@@ -216,7 +208,7 @@ export default function ModelConfigs() {
       const r = await api(`/api/model-configs/${encodeURIComponent(c.manage_id)}`, { method: "DELETE" });
       if (!r.ok) { showToast("err", `删除失败 HTTP ${r.status}`); return; }
       showToast("ok", `已删除「${c.name}」`);
-      await load();
+      await load(true);
     } finally {
       setBusy(false);
     }
@@ -322,6 +314,36 @@ export default function ModelConfigs() {
   return (
     <div className="page">
       {toast && <div className={`toast ${toast.type}`}>{toast.msg}</div>}
+      {modal && (
+        <div className="modal-mask" onClick={() => modal.type === "result" && setModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            {modal.type === "confirm" ? (
+              <>
+                <h3>删除模型</h3>
+                <p>
+                  确定从「{modal.vendor.name}」删除模型<br />
+                  <b className="mono">{modal.model}</b> 吗？
+                </p>
+                <p className="hint">删除后该厂商的清单里将不再包含此模型。</p>
+                <div className="modal-actions">
+                  <button className="ghost" onClick={() => setModal(null)} disabled={busy}>取消</button>
+                  <button className="danger-solid" onClick={handleDeleteModel} disabled={busy}>
+                    {busy ? "删除中…" : "确认删除"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3>{modal.ok ? "✅ 删除成功" : "❌ 删除失败"}</h3>
+                <p className={modal.ok ? "ok-line" : "error"}>{modal.msg}</p>
+                <div className="modal-actions">
+                  <button onClick={() => setModal(null)}>好的</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       <header>
         <h1>模型配置</h1>
         <p className="meta">
@@ -421,12 +443,8 @@ export default function ModelConfigs() {
                                             设默认
                                           </button>
                                         )}
-                                        <button
-                                          className={`link danger${pendingDelete?.vendorId === c.id && pendingDelete?.model === m ? " confirm" : ""}`}
-                                          onClick={() => armDelete(c, m)}
-                                          disabled={busy}
-                                        >
-                                          {pendingDelete?.vendorId === c.id && pendingDelete?.model === m ? "确认删除？" : "删除"}
+                                        <button className="link danger" onClick={() => askDeleteModel(c, m)} disabled={busy}>
+                                          删除
                                         </button>
                                       </td>
                                     </tr>
