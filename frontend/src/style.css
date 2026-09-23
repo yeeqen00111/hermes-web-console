@@ -95,6 +95,18 @@ td.ops { white-space: nowrap; }
 .add-btn { margin-top: 18px; width: 100%; padding: 10px; font-size: 14px; border: 1px dashed #9fb4d8; border-radius: 10px; background: #f8faff; color: #2160f3; cursor: pointer; }
 .add-btn:hover { background: #eef3ff; }
 
+/* ── toast 通知（右上角）────────────────────────── */
+.toast {
+  position: fixed; top: 18px; right: 18px; z-index: 1000;
+  max-width: 420px; padding: 10px 16px; border-radius: 10px;
+  font-size: 13px; line-height: 1.5; box-shadow: 0 6px 20px rgba(0,0,0,.14);
+}
+.toast.ok { background: #e7f6ec; color: #1f6b39; border: 1px solid #b5e0c4; }
+.toast.err { background: #fdecea; color: #a4271d; border: 1px solid #f3c1bd; }
+
+button.link.confirm { background: #d4382d; color: #fff; border-radius: 6px; padding: 2px 10px; }
+button.link.confirm:hover { text-decoration: none; background: #b52d23; }
+
 /* ── 厂商 → 模型 两级 ───────────────────────────── */
 .vendors { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
 .vendor { background: #fff; border: 1px solid #e3e6ea; border-radius: 10px; overflow: hidden; }

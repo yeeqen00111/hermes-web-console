@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // 模型配置管理页：厂商（自定义端点）→ 模型 两级结构。
 // 每个模型项常显操作：设默认（model/set）+ 删除（PUT /api/config 整列表替换 legacy 段）。
@@ -29,8 +29,6 @@ export default function ModelConfigs() {
   const [configs, setConfigs] = useState([]);
   const [current, setCurrent] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
   const [editing, setEditing] = useState(null);   // null=列表, config=编辑, {} =新增
   const [form, setForm] = useState(EMPTY_FORM);
   const [modelInput, setModelInput] = useState("");
@@ -38,22 +36,44 @@ export default function ModelConfigs() {
   const [expanded, setExpanded] = useState({});   // {endpoint_id: bool}
   const [modelFilter, setModelFilter] = useState("");
   const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState(null);       // {type:'ok'|'err', msg}
+  const [pendingDelete, setPendingDelete] = useState(null); // {vendorId, model} 行内确认
+  const toastTimer = useRef(null);
+  const delTimer = useRef(null);
+
+  const showToast = useCallback((type, msg) => {
+    setToast({ type, msg });
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), type === "ok" ? 3000 : 6000);
+  }, []);
+
+  function armDelete(c, m) {
+    // 行内二次确认：第一次点变「确认删除」，3 秒未点自动还原
+    if (pendingDelete && pendingDelete.vendorId === c.id && pendingDelete.model === m) {
+      clearTimeout(delTimer.current);
+      setPendingDelete(null);
+      handleDeleteModel(c, m);
+      return;
+    }
+    setPendingDelete({ vendorId: c.id, model: m });
+    clearTimeout(delTimer.current);
+    delTimer.current = setTimeout(() => setPendingDelete(null), 3000);
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
-    setError("");
     try {
       const r = await api("/api/model-configs");
-      if (!r.ok) { setError(`加载失败 HTTP ${r.status}`); return; }
+      if (!r.ok) { showToast("err", `加载失败 HTTP ${r.status}`); return; }
       const d = await r.json();
       setConfigs(d.configs ?? []);
       setCurrent(d.current ?? null);
     } catch (e) {
-      setError("请求失败：" + e.message);
+      showToast("err", "请求失败：" + e.message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showToast]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -138,14 +158,13 @@ export default function ModelConfigs() {
 
   async function handleSave() {
     setBusy(true);
-    setError("");
     try {
       const r = await api("/api/model-configs", {
         method: "POST", body: JSON.stringify(buildPayload()),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) { setError(`保存失败 HTTP ${r.status}: ${d.detail ?? ""}`); return; }
-      setNotice(form.id ? "已保存" : `已创建（id=${d.endpoint_id}）`);
+      if (!r.ok) { showToast("err", `保存失败 HTTP ${r.status}: ${d.detail ?? ""}`); return; }
+      showToast("ok", form.id ? "已保存" : `已创建（id=${d.endpoint_id}）`);
       setEditing(null);
       await load();
     } finally {
@@ -153,37 +172,38 @@ export default function ModelConfigs() {
     }
   }
 
-  // 常显按钮：设为默认 / 删除（用户要求每项操作始终可见，不藏在交互后）
+  // 常显按钮：设为默认 / 删除（行内二次确认，结果走 toast）
   async function handleSwitchModel(c, m) {
     if (isDefaultModel(c, m)) return;
     setBusy(true);
-    setError(""); setNotice("");
     try {
       const r = await api(
         `/api/model-configs/${encodeURIComponent(c.id)}/default?model=${encodeURIComponent(m)}`,
         { method: "POST" });
       const d = await r.json().catch(() => ({}));
-      if (d.confirm_required) { setError(`需要确认：${d.confirm_message}`); return; }
-      if (!r.ok) { setError(`切换失败 HTTP ${r.status}`); return; }
-      setNotice(`默认模型已切换：${m}`);
+      if (d.confirm_required) { showToast("err", `需要确认：${d.confirm_message}`); return; }
+      if (!r.ok) { showToast("err", `切换失败 HTTP ${r.status}`); return; }
+      showToast("ok", `默认模型已切换：${m}`);
       await load();
+    } catch (e) {
+      showToast("err", "切换失败：" + e.message);
     } finally {
       setBusy(false);
     }
   }
 
   async function handleDeleteModel(c, m) {
-    if (!window.confirm(`从「${c.name}」的清单里删除模型「${m}」？`)) return;
     setBusy(true);
-    setError(""); setNotice("");
     try {
       const r = await api(
         `/api/model-configs/${encodeURIComponent(c.id)}/models/${encodeURIComponent(m)}`,
         { method: "DELETE" });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) { setError(`删除失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
-      setNotice(`已删除模型：${m}`);
+      if (!r.ok) { showToast("err", `删除失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
+      showToast("ok", `已删除模型：${m}`);
       await load();
+    } catch (e) {
+      showToast("err", "删除失败：" + e.message);
     } finally {
       setBusy(false);
     }
@@ -191,12 +211,11 @@ export default function ModelConfigs() {
 
   async function handleDelete(c) {
     if (!c.manage_id) return;
-    if (!window.confirm(`确定删除「${c.name}」？（id=${c.manage_id}）`)) return;
     setBusy(true);
     try {
       const r = await api(`/api/model-configs/${encodeURIComponent(c.manage_id)}`, { method: "DELETE" });
-      if (!r.ok) { setError(`删除失败 HTTP ${r.status}`); return; }
-      setNotice(`已删除「${c.name}」`);
+      if (!r.ok) { showToast("err", `删除失败 HTTP ${r.status}`); return; }
+      showToast("ok", `已删除「${c.name}」`);
       await load();
     } finally {
       setBusy(false);
@@ -211,6 +230,7 @@ export default function ModelConfigs() {
     const isEdit = !!form.id;
     return (
       <div className="page">
+        {toast && <div className={`toast ${toast.type}`}>{toast.msg}</div>}
         <header>
           <h1>{isEdit ? "编辑模型配置" : "新增模型配置"}</h1>
           <button className="ghost" onClick={() => setEditing(null)} disabled={busy}>返回列表</button>
@@ -284,7 +304,6 @@ export default function ModelConfigs() {
             {validateResult.models?.length ? `（发现 ${validateResult.models.length} 个模型）` : ""}
           </p>
         )}
-        {error && <p className="error">{error}</p>}
 
         <div className="form-actions">
           <button className="ghost" onClick={handleValidate} disabled={busy || !form.base_url || !form.model}>
@@ -302,6 +321,7 @@ export default function ModelConfigs() {
   // ── 列表视图（厂商 → 模型 两级）──
   return (
     <div className="page">
+      {toast && <div className={`toast ${toast.type}`}>{toast.msg}</div>}
       <header>
         <h1>模型配置</h1>
         <p className="meta">
@@ -313,8 +333,6 @@ export default function ModelConfigs() {
           {loading ? "加载中…" : "刷新"}
         </button>
       </header>
-      {notice && <p className="ok-line">{notice}</p>}
-      {error && <p className="error">{error}</p>}
 
       {!loading && configs.length === 0 ? (
         <div className="state-block">
@@ -403,8 +421,12 @@ export default function ModelConfigs() {
                                             设默认
                                           </button>
                                         )}
-                                        <button className="link danger" onClick={() => handleDeleteModel(c, m)} disabled={busy}>
-                                          删除
+                                        <button
+                                          className={`link danger${pendingDelete?.vendorId === c.id && pendingDelete?.model === m ? " confirm" : ""}`}
+                                          onClick={() => armDelete(c, m)}
+                                          disabled={busy}
+                                        >
+                                          {pendingDelete?.vendorId === c.id && pendingDelete?.model === m ? "确认删除？" : "删除"}
                                         </button>
                                       </td>
                                     </tr>

@@ -134,16 +134,23 @@ def set_default_model(endpoint_id: str, model: str):
 
 @router.delete("/{vendor_id}/models/{model_id}", dependencies=[Depends(require_app_token)])
 def delete_vendor_model(vendor_id: str, model_id: str):
-    """从厂商模型清单删除一项（真删除）。
+    """从厂商模型清单删除一项（真删除，走 config/raw 原文通道）。
 
-    原理：用户的厂商在 legacy custom_providers 段（list），PUT /api/config 的深合并
-    对 list 是整体替换 → 回写「完整列表减去该项」即删除。默认模型不允许删（先切换）。
+    为什么不用 load_config 展开态：GET /api/config 是规范化后的视图（实测会把
+    legacy 段的模型清单清洗掉，导致误报 404）。config/raw 读磁盘原文 → 改 →
+    整体替换回写，语义保真。默认模型不允许删（先切换）。
     """
-    cfg = _guard(hc.request("GET", "/api/config"), "config-read")
-    cps = cfg.get("custom_providers")
+    import yaml
+
+    raw = _guard(hc.request("GET", "/api/config/raw"), "raw-read")
+    text = raw.get("yaml") or ""
+    doc = yaml.safe_load(text)
+    if not isinstance(doc, dict):
+        raise HTTPException(status_code=500, detail="服务器 config.yaml 不是映射结构")
+    cps = doc.get("custom_providers")
     if not isinstance(cps, list):
         raise HTTPException(status_code=404,
-                            detail="服务器配置没有 custom_providers 段（该厂商可能不在 legacy 段，暂不支持）")
+                            detail="服务器 config.yaml 没有 custom_providers 段（该厂商可能不在 legacy 段）")
     # vendor_id 形如 custom:<host>；legacy entry 按 name.lower() 对应（实测一致）
     bare = vendor_id.removeprefix("custom:").lower()
     target = next((e for e in cps
@@ -158,9 +165,9 @@ def delete_vendor_model(vendor_id: str, model_id: str):
                             detail=f"{model_id} 是该厂商的默认模型，请先切换到其他模型再删除")
 
     models.pop(model_id)
-    target["models"] = models
-    return _guard(hc.request("PUT", "/api/config",
-                             json={"config": {"custom_providers": cps}}), "config-write")
+    new_text = yaml.safe_dump(doc, allow_unicode=True, sort_keys=False)
+    return _guard(hc.request("PUT", "/api/config/raw",
+                             json={"yaml_text": new_text}), "raw-write")
 
 
 @router.delete("/{endpoint_id}", dependencies=[Depends(require_app_token)])
