@@ -199,9 +199,10 @@ export default function ModelConfigs() {
   }
 
   // ── 添加/编辑模型（弹框表单）──
-  function askAddModel(c) {
+  function askAddModel() {
     setModal({
-      type: "model-form", mode: "add", vendor: c, old: null,
+      type: "model-form", mode: "add", vendor: null,
+      vendorSlug: configs[0]?.id ?? "",
       values: { ...EMPTY_MODEL_VALUES },
     });
   }
@@ -220,7 +221,7 @@ export default function ModelConfigs() {
   }
 
   async function handleModelFormConfirm() {
-    const { mode, vendor, old, values } = modal;
+    const { mode, vendor, old, values, vendorSlug } = modal;
     const body = {
       name: values.name.trim(),
       display_name: values.display_name.trim() || null,
@@ -231,7 +232,7 @@ export default function ModelConfigs() {
     try {
       const url = mode === "edit"
         ? `/api/model-configs/${encodeURIComponent(vendor.id)}/models/${encodeURIComponent(old)}`
-        : `/api/model-configs/${encodeURIComponent(vendor.id)}/models`;
+        : `/api/model-configs/${encodeURIComponent(vendorSlug || vendor.id)}/models`;
       const r = await api(url, {
         method: mode === "edit" ? "PUT" : "POST",
         body: JSON.stringify(body),
@@ -327,7 +328,19 @@ export default function ModelConfigs() {
             {modal.type === "model-form" ? (
               <>
                 <h3>{modal.mode === "add" ? "添加模型" : "编辑模型"}</h3>
-                <p className="hint">厂商：{modal.vendor.name}</p>
+                {modal.mode === "add" && configs.length > 0 && (
+                  <label className="modal-field">
+                    厂商 *
+                    <select
+                      value={modal.vendorSlug ?? ""}
+                      onChange={(e) => setModal({ ...modal, vendorSlug: e.target.value })}
+                    >
+                      {configs.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name || c.id}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 <div className="modal-form">
                   <label>模型 ID *
                     <input value={modal.values.name} autoFocus
@@ -387,6 +400,9 @@ export default function ModelConfigs() {
             ? `当前默认：${current.model}${currentVendor ? `（${currentVendor.name}）` : ""}`
             : "未设置默认模型"}
         </p>
+        <button className="primary-add" onClick={() => askAddModel()} disabled={busy}>
+          ＋ 添加模型
+        </button>
         <button className="ghost" onClick={() => load(true)} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
         </button>
