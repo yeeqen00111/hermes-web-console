@@ -384,7 +384,7 @@ export default function ModelConfigs() {
             const open = !!expanded[c.id];
             const models = c.models ?? [];
             const hiddenSet = new Set(c.hidden_models ?? []);
-            // 默认视图：只显示未隐藏的；勾选「显示已删除」后全部显示（已删除的置灰）
+            // 默认视图：只显示未删除的；勾选「显示已删除」后全部显示（已删除的置灰）
             const visibleModels = models.filter((m) => showHidden || !hiddenSet.has(m));
             return (
               <div className="vendor" key={c.id}>
