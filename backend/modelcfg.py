@@ -57,12 +57,13 @@ def _guard(resp, what: str) -> Dict[str, Any]:
 
 
 @router.get("", dependencies=[Depends(require_app_token)])
-def list_model_configs():
+def list_model_configs(refresh: bool = False):
     """两接口合并（2026-09-23 定案）：
     - /api/model/options 的 custom:* providers = 主源（厂商+模型全集+is_current），实测覆盖 legacy custom_providers 段（商汤/火山都在）
     - /api/providers/custom-endpoints = 补充管理信息（has_api_key/preview），按 host 匹配
+    refresh=true 打破 picker 的 1h 缓存——删除/保存等写操作后的刷新必须带，否则界面显示旧数据。
     """
-    options = _guard(hc.request("GET", "/api/model/options"), "options")
+    options = _guard(hc.request("GET", f"/api/model/options?refresh={'true' if refresh else 'false'}"), "options")
     eps = _guard(hc.request("GET", "/api/providers/custom-endpoints"), "list")
     ep_list = eps.get("endpoints") or []
     current = eps.get("current") or {}
