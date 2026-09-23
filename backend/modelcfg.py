@@ -102,44 +102,79 @@ class ValidateBody(BaseModel):
 
 @router.get("", dependencies=[Depends(require_app_token)])
 def list_model_configs(refresh: bool = False):
-    """厂商列表 + 模型清单（config 模型 ∪ SQLite 手动模型，标注来源与隐藏态）。"""
-    options = _raw_ok(hc.request("GET", f"/api/model/options?refresh={'true' if refresh else 'false'}"), "options")
-    eps = _raw_ok(hc.request("GET", "/api/providers/custom-endpoints"), "list")
-    ep_list = eps.get("endpoints") or []
-    current = eps.get("current") or {}
+    """厂商列表 + 模型清单（分层组装，零缓存）：
+    - 厂商接入：config.yaml 原文（custom_providers 段 + providers 段）
+    - 模型条目：config entry.models（discovery）∪ SQLite custom_models（手动），SQLite 元数据优先
+    - hidden：SQLite hidden_models（展示层删除标记）
+    refresh 参数保留（兼容旧前端），raw 通道本身零缓存。
+    """
+    doc = _load_doc()
+    model_cfg = doc.get("model") or {}
+    cur_provider = str(model_cfg.get("provider", "") or "")
+    cur_model = str(model_cfg.get("default", "") or "")
+    cur_base = str(model_cfg.get("base_url", "") or "").rstrip("/")
 
-    def host(url: str) -> str:
-        return str(url or "").split("://", 1)[-1].split("/")[0].lower()
-
-    # SQLite 手动模型：vendor slug → [{model, context_length, reasoning_effort}]
-    manual_rows = hidden_store.list_manual()
+    # SQLite 手动条目按 vendor 归组
     manual_by_vendor: Dict[str, List[Dict[str, Any]]] = {}
-    for r in manual_rows:
+    for r in hidden_store.list_manual():
         manual_by_vendor.setdefault(r["vendor"], []).append(r)
 
     configs = []
-    for p in (options.get("providers") or []):
-        slug = str(p.get("slug") or "")
-        if "custom" not in slug.lower():
-            continue
-        ep = next((e for e in ep_list
-                   if e.get("base_url") and host(e["base_url"]) and host(e["base_url"]) in slug), None)
-        hidden = sorted(hidden_store.hidden_set(slug))
+    for e, section, key in _all_vendor_entries(doc):
+        name = str(e.get("name") or "")
+        slug = _slug_for(name)
+        base_url = str(e.get("base_url") or "")
+        hidden = hidden_store.hidden_set(slug)
+        manual = {m["model"]: m for m in manual_by_vendor.get(slug, [])}
+
+        # 模型条目合并：config entry.models ∪ SQLite 手动（manual 元数据优先），hidden 标注
+        config_models = e.get("models")
+        config_names = list(config_models.keys()) if isinstance(config_models, dict) else             [str(m) for m in config_models] if isinstance(config_models, list) else []
+        items = []
+        seen = set()
+        for m in config_names:
+            if m in seen:
+                continue
+            seen.add(m)
+            man = manual.get(m)
+            items.append({
+                "model": m,
+                "display_name": (man or {}).get("display_name"),
+                "source": "manual" if man else "config",
+                "hidden": m in hidden,
+                "context_length": (man or {}).get("context_length") or
+                                  (config_models.get(m, {}) if isinstance(config_models, dict) else {}).get("context_length"),
+                "reasoning_effort": (man or {}).get("reasoning_effort") or
+                                    (config_models.get(m, {}) if isinstance(config_models, dict) else {}).get("reasoning_effort"),
+            })
+        for m, man in manual.items():
+            if m in seen:
+                continue
+            seen.add(m)
+            items.append({
+                "model": m, "display_name": man.get("display_name"),
+                "source": "manual", "hidden": False,
+                "context_length": man.get("context_length"),
+                "reasoning_effort": man.get("reasoning_effort"),
+            })
+
+        is_current = (cur_provider == slug) or                      (cur_provider.lower() == "custom" and bool(cur_base) and cur_base == base_url.rstrip("/"))
         configs.append({
-            "id": slug,
-            "manage_id": (ep or {}).get("id"),
-            "name": p.get("name") or slug,
-            "base_url": (ep or {}).get("base_url") or str(p.get("api_url") or ""),
-            "models": p.get("models") or [],
-            "manual_models": manual_by_vendor.get(slug, []),
-            "hidden_models": hidden,
-            "model": (ep or {}).get("model") or (p.get("models") or [""])[0],
-            "has_api_key": (ep or {}).get("has_api_key"),
-            "api_key_preview": (ep or {}).get("api_key_preview"),
-            "is_current": bool(p.get("is_current")),
-            "api_mode": (ep or {}).get("api_mode"),
+            "id": slug,                                    # 切换/设默认用（model/set 认 slug）
+            "manage_id": slug,                             # raw 通道下编辑/删除都用 slug
+            "name": name,
+            "base_url": base_url,
+            "items": items,                                # 对象数组（model/display_name/source/hidden/元数据）
+            "models": [i["model"] for i in items],         # 兼容字段
+            "hidden_models": sorted(hidden),
+            "model": str(e.get("model") or (items[0]["model"] if items else "")),
+            "has_api_key": bool(str(e.get("api_key") or "").strip() or str(e.get("key_env") or "").strip()),
+            "is_current": is_current,
+            "api_mode": str(e.get("api_mode") or e.get("transport") or ""),
         })
-    return {"configs": configs, "current": current}
+    return {"configs": configs, "current": {
+        "provider": cur_provider, "model": cur_model, "base_url": cur_base,
+    }}
 
 
 def _apply_vendor_fields(entry: Dict[str, Any], body: ModelConfigBody) -> None:
