@@ -94,3 +94,21 @@ td.ops { white-space: nowrap; }
 
 .add-btn { margin-top: 18px; width: 100%; padding: 10px; font-size: 14px; border: 1px dashed #9fb4d8; border-radius: 10px; background: #f8faff; color: #2160f3; cursor: pointer; }
 .add-btn:hover { background: #eef3ff; }
+
+/* ── 厂商 → 模型 两级 ───────────────────────────── */
+.vendors { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.vendor { background: #fff; border: 1px solid #e3e6ea; border-radius: 10px; overflow: hidden; }
+.vendor-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; cursor: pointer; }
+.vendor-row:hover { background: #fafbfc; }
+.arrow { display: inline-block; transition: transform .15s; color: #8a9199; font-size: 13px; }
+.arrow.open { transform: rotate(90deg); }
+.v-name { font-size: 14px; font-weight: 600; }
+.v-url { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-ops { white-space: nowrap; }
+
+.vendor-models { padding: 4px 14px 14px 38px; border-top: 1px solid #f0f2f4; }
+.chips.selectable { margin-top: 10px; gap: 8px; }
+.chip { cursor: pointer; padding: 5px 12px; font-size: 12px; background: #f2f4f7; border: 1px solid #e3e6ea; border-radius: 999px; color: #3b4250; transition: border-color .12s, background .12s; }
+.chip:hover { border-color: #2160f3; background: #f5f8ff; }
+.chip.default { background: #e8f0ff; border-color: #2160f3; color: #1747b8; }
+.chip-tag { margin-left: 6px; font-size: 10px; color: #2160f3; }

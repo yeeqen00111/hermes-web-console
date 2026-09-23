@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 
-// 模型配置管理页：你的系统只管自定义模型配置（= Hermes custom endpoints）。
-// 表格 + 新增/编辑表单 + 测试连接 + 设为默认 + 删除。
+// 模型配置管理页：厂商（自定义端点）→ 模型 两级结构。
+// 厂商行可展开为该厂商的模型 chips；点任意模型 = 切换全局默认模型。
+// 模型来源 = 自动发现 + 手填的合集（每个端点的 models[]）。
 const EMPTY_FORM = {
   id: null,
   name: "",
   base_url: "",
   model: "",
   api_key: "",
-  clearKey: false,     // 勾选 = 显式清除已存 key（api_key:""）
+  clearKey: false,
   api_mode: "",
   context_length: "",
   discover_models: true,
@@ -29,9 +30,10 @@ export default function ModelConfigs() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [editing, setEditing] = useState(null);   // null=列表, {} 或 config=表单
+  const [editing, setEditing] = useState(null);   // null=列表, config=编辑, {} =新增
   const [form, setForm] = useState(EMPTY_FORM);
   const [validateResult, setValidateResult] = useState(null);
+  const [expanded, setExpanded] = useState({});   // {endpoint_id: bool}
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -52,6 +54,13 @@ export default function ModelConfigs() {
 
   useEffect(() => { load(); }, [load]);
 
+  const isDefaultModel = (c, m) =>
+    current && current.provider === c.id && current.model === m;
+
+  function toggleExpand(id) {
+    setExpanded((e) => ({ ...e, [id]: !e[id] }));
+  }
+
   function openCreate() {
     setForm(EMPTY_FORM);
     setValidateResult(null);
@@ -61,7 +70,7 @@ export default function ModelConfigs() {
   function openEdit(c) {
     setForm({
       id: c.id, name: c.name ?? "", base_url: c.base_url ?? "", model: c.model ?? "",
-      api_key: "", clearKey: false,        // 编辑时 api_key 留空=不动
+      api_key: "", clearKey: false,
       api_mode: c.api_mode ?? "",
       context_length: c.context_length ?? "",
       discover_models: c.discover_models ?? true,
@@ -83,9 +92,9 @@ export default function ModelConfigs() {
       discover_models: !!form.discover_models,
       make_default: !!form.make_default,
     };
-    if (form.id) payload.id = form.id;                       // 编辑：带上原 id
-    if (form.clearKey) payload.api_key = "";                 // 显式清除
-    else if (form.api_key.trim()) payload.api_key = form.api_key.trim();  // 新 key
+    if (form.id) payload.id = form.id;
+    if (form.clearKey) payload.api_key = "";
+    else if (form.api_key.trim()) payload.api_key = form.api_key.trim();
     if (models.length) payload.models = models;
     return payload;
   }
@@ -101,8 +110,7 @@ export default function ModelConfigs() {
           api_key: p.api_key, api_mode: p.api_mode,
         }),
       });
-      const d = await r.json();
-      setValidateResult(d);
+      setValidateResult(await r.json());
     } catch (e) {
       setValidateResult({ ok: false, message: e.message });
     } finally {
@@ -127,16 +135,19 @@ export default function ModelConfigs() {
     }
   }
 
-  async function handleSetDefault(c) {
+  // 点模型 chip = 切换全局默认模型
+  async function handleSwitchModel(c, m) {
+    if (isDefaultModel(c, m)) return;
     setBusy(true);
     setError(""); setNotice("");
     try {
-      const r = await api(`/api/model-configs/${encodeURIComponent(c.id)}/default?model=${encodeURIComponent(c.model)}`,
+      const r = await api(
+        `/api/model-configs/${encodeURIComponent(c.id)}/default?model=${encodeURIComponent(m)}`,
         { method: "POST" });
       const d = await r.json().catch(() => ({}));
       if (d.confirm_required) { setError(`需要确认：${d.confirm_message}`); return; }
-      if (!r.ok) { setError(`设默认失败 HTTP ${r.status}`); return; }
-      setNotice(`已将「${c.name} / ${c.model}」设为默认`);
+      if (!r.ok) { setError(`切换失败 HTTP ${r.status}`); return; }
+      setNotice(`默认模型已切换：${c.name} / ${m}`);
       await load();
     } finally {
       setBusy(false);
@@ -172,7 +183,7 @@ export default function ModelConfigs() {
         <div className="form">
           <label>名称 *<input value={form.name} onChange={set("name")} placeholder="如：火山方舟" /></label>
           <label>Base URL *<input value={form.base_url} onChange={set("base_url")} placeholder="https://…/v3" /></label>
-          <label>默认模型 *<input value={form.model} onChange={set("model")} placeholder="如 deepseek-v4-flash" /></label>
+          <label>端点默认模型 *<input value={form.model} onChange={set("model")} placeholder="如 deepseek-v4-flash" /></label>
           <label>
             API Key
             <input type="password" value={form.api_key} onChange={set("api_key")}
@@ -218,17 +229,18 @@ export default function ModelConfigs() {
             {busy ? "处理中…" : "保存"}
           </button>
         </div>
+        <p className="hint">说明：端点默认模型是该厂商的标识模型；切换全局默认在列表页点对应模型即可。</p>
       </div>
     );
   }
 
-  // ── 列表视图 ──
+  // ── 列表视图（厂商 → 模型 两级）──
   return (
     <div className="page">
       <header>
         <h1>模型配置</h1>
         {current && (
-          <p className="meta">当前默认：{current.model}（{current.base_url}）</p>
+          <p className="meta">当前默认：{current.model}（{current.provider}）</p>
         )}
         <button className="ghost" onClick={() => load()} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
@@ -240,44 +252,63 @@ export default function ModelConfigs() {
       {!loading && configs.length === 0 ? (
         <div className="state-block">
           <p>还没有模型配置。</p>
-          <p className="hint">点击右上「＋ 新增」添加第一个自定义模型端点。</p>
+          <p className="hint">点击右上「＋ 新增」添加第一个厂商端点。</p>
         </div>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th className="col-name">名称</th>
-              <th>Base URL</th>
-              <th className="col-num">模型</th>
-              <th className="col-status">状态</th>
-              <th className="col-ops">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {configs.map((c) => (
-              <tr key={c.id}>
-                <td className="mono">{c.name}</td>
-                <td className="mono dim">{c.base_url}</td>
-                <td className="mdl">{c.model}</td>
-                <td className="num">
-                  {c.is_current
-                    ? <span className="pill pill-on">● 使用中</span>
-                    : <span className="pill">未激活</span>}
-                </td>
-                <td className="ops">
-                  {!c.is_current && (
-                    <button className="link" onClick={() => handleSetDefault(c)} disabled={busy}>设默认</button>
-                  )}
-                  <button className="link" onClick={() => openEdit(c)} disabled={busy}>编辑</button>
-                  <button className="link danger" onClick={() => handleDelete(c)} disabled={busy}>删除</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="vendors">
+          {configs.map((c) => {
+            const open = !!expanded[c.id];
+            const models = c.models ?? [];
+            return (
+              <div className="vendor" key={c.id}>
+                <div className="vendor-row" onClick={() => toggleExpand(c.id)}>
+                  <span className={`arrow ${open ? "open" : ""}`}>▸</span>
+                  <span className="mono v-name">{c.name}</span>
+                  <span className="mono dim v-url">{c.base_url}</span>
+                  <span className="pill">
+                    {c.is_current ? (
+                      <span className="pill pill-on">● 使用中</span>
+                    ) : (
+                      <span className="pill">未激活</span>
+                    )}
+                  </span>
+                  <span className="v-ops" onClick={(e) => e.stopPropagation()}>
+                    <button className="link" onClick={() => openEdit(c)} disabled={busy}>编辑</button>
+                    <button className="link danger" onClick={() => handleDelete(c)} disabled={busy}>删除</button>
+                  </span>
+                </div>
+
+                {open && (
+                  <div className="vendor-models">
+                    {models.length === 0 ? (
+                      <p className="hint">
+                        该厂商还没有模型清单——「编辑」里手填，或保存后用「测试连接」自动发现。
+                      </p>
+                    ) : (
+                      <ul className="chips selectable">
+                        {models.map((m) => (
+                          <li
+                            key={m}
+                            className={isDefaultModel(c, m) ? "chip default" : "chip"}
+                            onClick={() => handleSwitchModel(c, m)}
+                            title={isDefaultModel(c, m) ? "当前默认" : "点击切换为默认"}
+                          >
+                            {m}
+                            {isDefaultModel(c, m) && <span className="chip-tag">默认</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       )}
 
-      <button className="add-btn" onClick={openCreate}>＋ 新增</button>
+      <button className="add-btn" onClick={openCreate}>＋ 新增厂商端点</button>
+      <p className="hint">切换说明：点模型 = 修改全局默认模型（影响之后的新会话）；对话中的热切换在「对话」页顶栏（待上线）。</p>
     </div>
   );
 }
