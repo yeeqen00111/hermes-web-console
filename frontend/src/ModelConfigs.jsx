@@ -232,7 +232,10 @@ export default function ModelConfigs() {
       const url = mode === "edit"
         ? `/api/model-configs/${encodeURIComponent(vendor.id)}/models/${encodeURIComponent(old)}`
         : `/api/model-configs/${encodeURIComponent(vendor.id)}/models`;
-      const r = await api(url, { method: "PUT", body: JSON.stringify(body) });
+      const r = await api(url, {
+        method: mode === "edit" ? "PUT" : "POST",
+        body: JSON.stringify(body),
+      });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { showToast("err", `保存失败：${d.detail ?? `HTTP ${r.status}`}`); return; }
       showToast("ok", mode === "edit" ? `已保存：${old} → ${body.name}` : `已添加模型：${body.name}`);
