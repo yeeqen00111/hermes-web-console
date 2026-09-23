@@ -18,9 +18,21 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 import hidden_store
-from hidden_store import hide_model as _hide, unhide_model as _unhide
+from hidden_store import (
+    add_custom, delete_custom, hide_model as _hide, list_custom, rename_custom,
+    unhide_model as _unhide,
+)
 
 router = APIRouter(prefix="/api/model-configs", tags=["model-configs"])
+
+VALID_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _raw_ok(resp, what: str) -> Dict[str, Any]:
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502,
+                            detail=f"{what} HTTP {resp.status_code}: {resp.text[:400]}")
+    return resp.json()
 
 
 def _load_doc() -> Dict[str, Any]:
@@ -30,18 +42,6 @@ def _load_doc() -> Dict[str, Any]:
     if not isinstance(doc, dict):
         raise HTTPException(status_code=500, detail="服务器 config.yaml 不是映射结构")
     return doc
-
-
-def _save_doc(doc: Dict[str, Any]) -> None:
-    new_text = yaml.safe_dump(doc, allow_unicode=True, sort_keys=False)
-    _raw_ok(hc.request("PUT", "/api/config/raw", json={"yaml_text": new_text}), "raw-write")
-
-
-def _raw_ok(resp, what: str) -> Dict[str, Any]:
-    if resp.status_code >= 400:
-        raise HTTPException(status_code=502,
-                            detail=f"{what} HTTP {resp.status_code}: {resp.text[:400]}")
-    return resp.json()
 
 
 def _all_vendor_entries(doc: Dict[str, Any]) -> List[Any]:
@@ -102,14 +102,7 @@ class ValidateBody(BaseModel):
 
 @router.get("", dependencies=[Depends(require_app_token)])
 def list_model_configs(refresh: bool = False):
-    """厂商列表（2026-09-23 调研定案）：主源 = /api/model/options 的 custom:* providers。
-
-    数据链（源码确认）：load_picker_context → get_compatible_custom_providers(cfg)
-    = custom_providers 字段的官方合并视图（legacy 段 + providers 段），含 discovery
-    融合的模型名与 is_current 语义。refresh=false（默认）只探测当前厂商、其余走 1h
-    磁盘缓存（快）；refresh=true 探测全部并破缓存（慢但强同步——服务器手改后用这个）。
-    /api/providers/custom-endpoints 仅补充 key 管理信息（按 host 匹配）。
-    """
+    """厂商列表 + 模型清单（config 模型 ∪ SQLite 手动模型，标注来源与隐藏态）。"""
     options = _raw_ok(hc.request("GET", f"/api/model/options?refresh={'true' if refresh else 'false'}"), "options")
     eps = _raw_ok(hc.request("GET", "/api/providers/custom-endpoints"), "list")
     ep_list = eps.get("endpoints") or []
@@ -117,6 +110,12 @@ def list_model_configs(refresh: bool = False):
 
     def host(url: str) -> str:
         return str(url or "").split("://", 1)[-1].split("/")[0].lower()
+
+    # SQLite 手动模型：vendor slug → [{model, context_length, reasoning_effort}]
+    manual_rows = hidden_store.list_manual()
+    manual_by_vendor: Dict[str, List[Dict[str, Any]]] = {}
+    for r in manual_rows:
+        manual_by_vendor.setdefault(r["vendor"], []).append(r)
 
     configs = []
     for p in (options.get("providers") or []):
@@ -127,12 +126,13 @@ def list_model_configs(refresh: bool = False):
                    if e.get("base_url") and host(e["base_url"]) and host(e["base_url"]) in slug), None)
         hidden = sorted(hidden_store.hidden_set(slug))
         configs.append({
-            "id": slug,                                    # 切换/设默认用（model/set 认 picker slug）
-            "manage_id": (ep or {}).get("id"),             # 编辑/删除用（custom-endpoints 体系；可能缺）
+            "id": slug,
+            "manage_id": (ep or {}).get("id"),
             "name": p.get("name") or slug,
             "base_url": (ep or {}).get("base_url") or str(p.get("api_url") or ""),
             "models": p.get("models") or [],
-            "hidden_models": hidden,                       # 展示层隐藏清单（SQLite）
+            "manual_models": manual_by_vendor.get(slug, []),
+            "hidden_models": hidden,
             "model": (ep or {}).get("model") or (p.get("models") or [""])[0],
             "has_api_key": (ep or {}).get("has_api_key"),
             "api_key_preview": (ep or {}).get("api_key_preview"),
@@ -155,15 +155,7 @@ def _apply_vendor_fields(entry: Dict[str, Any], body: ModelConfigBody) -> None:
     if body.context_length and body.context_length > 0:
         entry["context_length"] = int(body.context_length)
     entry["discover_models"] = bool(body.discover_models)
-    if body.models is not None:
-        # 合并语义（与官方 _write_custom_endpoint 一致）：body.models 只增/更新，
-        # 已有项保留——「移除」走独立的模型删除端点。
-        existing = entry.get("models") if isinstance(entry.get("models"), dict) else {}
-        for m in body.models:
-            m = m.strip()
-            if m:
-                existing.setdefault(m, {})
-        entry["models"] = existing
+    # 模型清单不在 config 层写（SQLite custom_models 管理展示层模型）
     # api_key 的写入/清除在 upsert 主函数里走 PUT/DELETE /api/env（.env + key_env 引用，
     # 与官方 upsert 同款生命周期），不在此处处理。
 
@@ -233,7 +225,10 @@ def activate_model_config(vendor_id: str):
     model_cfg["provider"] = _slug_for(v.get("name"))
     model_cfg["default"] = str(v.get("model") or "")
     model_cfg["base_url"] = str(v.get("base_url") or "").rstrip("/")
-    _save_doc(doc)
+    _save
+
+
+    _doc(doc)
     return {"ok": True}
 
 
@@ -282,74 +277,65 @@ def unhide_vendor_model(vendor_id: str, model_id: str):
 
 class AddModelBody(BaseModel):
     name: str
+    context_length: Optional[int] = None
+    reasoning_effort: Optional[str] = None   # minimal|low|medium|high|xhigh|max|ultra
 
 
 class RenameModelBody(BaseModel):
     name: str
+    context_length: Optional[int] = None
+    reasoning_effort: Optional[str] = None
+
+
+# 合法思考档位（hermes_constants.VALID_REASONING_EFFORTS）
+VALID_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _model_meta(body) -> Dict[str, Any]:
+    """从表单字段构造 models.<id> 的元数据项（context_length / reasoning_effort）。"""
+    meta: Dict[str, Any] = {}
+    if body.context_length and body.context_length > 0:
+        meta["context_length"] = int(body.context_length)
+    if body.reasoning_effort:
+        if body.reasoning_effort not in VALID_EFFORTS:
+            raise HTTPException(status_code=400,
+                                detail=f"思考等级非法：{body.reasoning_effort}（合法：{', '.join(VALID_EFFORTS)}）")
+        meta["reasoning_effort"] = body.reasoning_effort
+    return meta
 
 
 @router.post("/{vendor_id}/models", dependencies=[Depends(require_app_token)])
 def add_vendor_model(vendor_id: str, body: AddModelBody):
-    """向厂商清单添加单个模型（幂等；已存在返回 409）。"""
-    doc = _load_doc()
-    v, _sec, _key = _find_vendor(doc, vendor_id)
-    if v is None:
-        raise HTTPException(status_code=404, detail=f"找不到厂商 {vendor_id}")
+    """向厂商的可选列表添加一个模型（SQLite；Hermes config 不动）。"""
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="模型名不能为空")
-    models = v.get("models")
-    if not isinstance(models, dict):
-        models = {}
-    if name in models:
-        raise HTTPException(status_code=409, detail=f"模型 {name} 已存在")
-    models[name] = {}
-    v["models"] = models
-    _save_doc(doc)
+    ctx_len = body.context_length if body.context_length and body.context_length > 0 else None
+    effort = body.reasoning_effort if body.reasoning_effort in VALID_EFFORTS else None
+    if body.reasoning_effort and not effort:
+        raise HTTPException(status_code=400,
+                            detail=f"思考等级非法：{body.reasoning_effort}（合法：{', '.join(VALID_EFFORTS)}）")
+    add_custom(vendor_id, name, ctx_len, effort)
     return {"ok": True, "model": name}
 
 
 @router.put("/{vendor_id}/models/{model_id}", dependencies=[Depends(require_app_token)])
 def rename_vendor_model(vendor_id: str, model_id: str, body: AddModelBody):
-    """重命名（编辑）单个模型：旧名出、新名进，元数据保留。"""
-    doc = _load_doc()
-    v, _sec, _key = _find_vendor(doc, vendor_id)
-    if v is None:
-        raise HTTPException(status_code=404, detail=f"找不到厂商 {vendor_id}")
-    models = v.get("models")
-    if not isinstance(models, dict) or model_id not in models:
-        raise HTTPException(status_code=404, detail=f"厂商 {v.get('name')} 的清单里没有 {model_id}")
+    """重命名（编辑）一个模型：SQLite 内旧名出、新名进（元数据保留）。"""
     new_name = body.name.strip()
     if not new_name:
         raise HTTPException(status_code=400, detail="新模型名不能为空")
     if new_name == model_id:
         return {"ok": True, "model": new_name}
-    if new_name in models:
-        raise HTTPException(status_code=409, detail=f"模型 {new_name} 已存在")
-    meta = models.pop(model_id)
-    models[new_name] = meta
-    # 若该厂商的默认模型正是被改名的那个，同步改默认
-    if str(v.get("model")) == model_id:
-        v["model"] = new_name
-    _save_doc(doc)
+    rename_custom(vendor_id, model_id, new_name)
     return {"ok": True, "model": new_name}
 
 
 @router.delete("/{vendor_id}/models/{model_id}", dependencies=[Depends(require_app_token)])
 def delete_vendor_model(vendor_id: str, model_id: str):
-    """从厂商模型清单删除一项（raw 读改写，真删除）。默认模型不允许删（先切换）。"""
-    doc = _load_doc()
-    v, _sec, _key = _find_vendor(doc, vendor_id)
-    if v is None:
-        raise HTTPException(status_code=404, detail=f"找不到厂商 {vendor_id}")
-    models = v.get("models")
-    if not isinstance(models, dict) or model_id not in models:
-        raise HTTPException(status_code=404, detail=f"厂商 {v.get('name')} 的清单里没有 {model_id}")
-    if str(v.get("model")) == model_id:
-        raise HTTPException(status_code=400,
-                            detail=f"{model_id} 是该厂商的默认模型，请先切换到其他模型再删除")
-    models.pop(model_id)
-    _save_doc(doc)
+    """删除一个模型条目（SQLite；同时清隐藏记录，列表立即消失）。"""
+    delete_custom(vendor_id, model_id)
+    _unhide(vendor_id, model_id)
     return {"ok": True}
 
 
