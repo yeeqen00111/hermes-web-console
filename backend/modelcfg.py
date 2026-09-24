@@ -44,6 +44,13 @@ def _load_doc() -> Dict[str, Any]:
     return doc
 
 
+def _save_doc(doc: Dict[str, Any]) -> None:
+    """把 doc 序列化回 dashboard 磁盘上的 config.yaml 原文并写回（与 _load_doc 成对）。"""
+    _raw_ok(hc.request("PUT", "/api/config/raw",
+                       json={"yaml_text": yaml.safe_dump(doc, allow_unicode=True, sort_keys=False)}),
+            "raw-save")
+
+
 def _all_vendor_entries(doc: Dict[str, Any]) -> List[Any]:
     """合并两个段的厂商条目。返回 (entry, section, key) 三元组——entry 是 doc 内的
     **原引用**（改动直接作用于 doc，保存时生效）；key 仅 providers 段有。"""
