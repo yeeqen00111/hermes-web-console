@@ -8,16 +8,19 @@
 ## 0. 一句话总览
 
 ```
-浏览器 React (ModelConfigs.jsx)
-   │  每个操作发 REST 到自有后端 FastAPI :8000 (modelcfg.py)
-   ▼
-自有后端（只连 dashboard，不碰 gateway / 8642 / /api/pty）
-   │  复用 Hermes dashboard 的 REST：config.yaml 读改写、.env 密钥、model/set 热切换、providers validate
+浏览器 React ──┬── Chat.jsx ─────────── POST /api/chat {text} ── SSE ──┐
+                │                                                      │
+                └── ModelConfigs.jsx ──── REST 每操作 ────────────────┤
+                                                                        ▼
+自有后端 FastAPI :8000（只连 dashboard，不碰 gateway / 8642 / /api/pty）
+   │
+   ├── 配置链路：config.yaml 读改写、.env 密钥、model/set 热切换、providers validate
+   └── 对话链路：ws-ticket 换 ticket → WS /api/ws (JSON-RPC) → 事件桥成 SSE
    ▼
 Hermes dashboard   http://61.184.23.92:8426   （= 服务器上 9119 的公网代理）
    │
    ▼
-Hermes Gateway（9119 运行态）  读写 config.yaml 磁盘 / .env
+Hermes Gateway（9119 运行态）  写 config.yaml/.env 磁盘；跑 agent、流式吐 token
 
 另有本地 SQLite (backend/hidden_models.db)= 我们的「展示层」配置（手动模型 & 隐藏清单 & 默认标记），
 不写 Hermes config.yaml——专门规避 models_discovered 厂商清单被自动回写（删了会复活）。
@@ -27,21 +30,42 @@ Hermes Gateway（9119 运行态）  读写 config.yaml 磁盘 / .env
 
 ## 1. 全景图（Mermaid，GitHub 可直接渲染）
 
+> 两条链路同图：上半=模型配置（config 读改写），下半=对话（SSE↔WS JSON-RPC 桥）。
+
 ```mermaid
 flowchart LR
-    F["前端 React<br/>ModelConfigs.jsx"]
-    B["后端 FastAPI :8000<br/>modelcfg.py"]
+    subgraph 前端
+        FChat["Chat.jsx<br/>(对话)"]
+        FConf["ModelConfigs.jsx<br/>(模型配置)"]
+    end
+
+    subgraph 后端
+        BChat["/api/chat<br/>(main.py)"]
+        BConf["/api/model-configs<br/>(modelcfg.py)"]
+    end
+
     DH["Hermes dashboard<br/>8426 = 9119 代理"]
     GW["Hermes Gateway 9119"]
     SQ[("本地 SQLite<br/>hidden_models.db<br/>展示层")]
 
-    F -- "列表/增删改/校验/设默认/隐藏/批量" --> B
-    B -- "GET/PUT /api/config/raw (config.yaml 读写)" --> DH
-    B -- "PUT/DELETE /api/env (API Key)" --> DH
-    B -- "POST /api/model/set (默认模型热切换)" --> DH
-    B -- "POST /api/providers/custom-endpoints/validate" --> DH
-    B -- "手动模型/隐藏清单/默认标记　纯本地" --> SQ
-    DH -- "热配置 → 磁盘 config.yaml" --> GW
+    %% ── 模型配置链路 ──
+    FConf -- "配置/增删改/设默认/隐藏" --> BConf
+    BConf -- "GET/PUT /api/config/raw<br/>config.yaml 读改写" --> DH
+    BConf -- "PUT/DELETE /api/env<br/>API Key" --> DH
+    BConf -- "POST /api/model/set<br/>默认模型热切换" --> DH
+    BConf -- "POST /api/providers/<br/>custom-endpoints/validate" --> DH
+    BConf -- "手动模型/隐藏/<br/>默认标记 纯本地" --> SQ
+
+    %% ── 对话链路 ──
+    FChat -- "POST /api/chat {text}<br/>SSE 事件流" --> BChat
+    BChat -- "POST /api/auth/ws-ticket<br/>换单次 ticket" --> DH
+    BChat -- "WS /api/ws?ticket=…<br/>JSON-RPC: session.create<br/>prompt.submit" --> DH
+    DH -- "agent 运行 / 流式 token<br/>工具调用 / 终态" --> GW
+    GW -- "事件帧回传<br/>(params.type=message.delta…)" --> DH
+    DH -- "WS 帧 → SSE<br/>逐 token 推送" --> FChat
+
+    %% ── dashboard → gateway 持久化 ──
+    DH -- "热配置 → 磁盘<br/>config.yaml" --> GW
     DH -- ".env 密钥 → 磁盘" --> GW
 ```
 
