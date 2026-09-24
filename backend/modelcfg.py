@@ -199,6 +199,7 @@ def list_model_configs(refresh: bool = False):
             "hidden_models": sorted(hidden),
             "model": str(e.get("model") or (items[0]["model"] if items else "")),
             "has_api_key": bool(str(e.get("api_key") or "").strip() or str(e.get("key_env") or "").strip()),
+            "discover_models": bool(e.get("discover_models", True)),
             "is_current": is_current,
             "api_mode": str(e.get("api_mode") or e.get("transport") or ""),
         })
@@ -383,6 +384,19 @@ def add_vendor_model(vendor_id: str, body: AddModelBody):
         raise HTTPException(status_code=400,
                             detail=f"思考等级非法：{body.reasoning_effort}（合法：{', '.join(VALID_EFFORTS)}）")
     add_custom(vendor_id, name, body.display_name, ctx_len, effort)
+    # 思考等级运行时生效：写 agent.reasoning_overrides（与 rename 路径同款）
+    if effort:
+        import yaml as _y
+        doc = _load_doc()
+        agent_cfg = doc.setdefault("agent", {})
+        ov = agent_cfg.get("reasoning_overrides")
+        if not isinstance(ov, dict):
+            ov = {}
+        ov[name] = effort
+        agent_cfg["reasoning_overrides"] = ov
+        _raw_ok(hc.request("PUT", "/api/config/raw",
+                           json={"yaml_text": _y.safe_dump(doc, allow_unicode=True, sort_keys=False)}),
+                "overrides-write")
     return {"ok": True, "model": name}
 
 
@@ -422,20 +436,22 @@ def rename_vendor_model(vendor_id: str, model_id: str, body: AddModelBody):
             doc["model"] = model_cfg
             _save_doc(doc)
 
-    # 思考等级运行时生效：写 agent.reasoning_overrides（旧名清理、新名置位）
+    # 思考等级运行时生效：写 agent.reasoning_overrides（旧名清理、新名置位；清空则删除）
+    import yaml as _y
+    doc2 = _load_doc()
+    agent_cfg = doc2.setdefault("agent", {})
+    ov = agent_cfg.get("reasoning_overrides")
+    if not isinstance(ov, dict):
+        ov = {}
+    ov.pop(model_id, None)
     if effort:
-        doc2 = _load_doc()
-        agent_cfg = doc2.setdefault("agent", {})
-        ov = agent_cfg.get("reasoning_overrides")
-        if not isinstance(ov, dict):
-            ov = {}
-        ov.pop(model_id, None)
         ov[new_name] = effort
-        agent_cfg["reasoning_overrides"] = ov
-        import yaml as _y
-        _raw_ok(hc.request("PUT", "/api/config/raw",
-                           json={"yaml_text": _y.safe_dump(doc2, allow_unicode=True, sort_keys=False)}),
-                "overrides-write")
+    else:
+        ov.pop(new_name, None)
+    agent_cfg["reasoning_overrides"] = ov
+    _raw_ok(hc.request("PUT", "/api/config/raw",
+                       json={"yaml_text": _y.safe_dump(doc2, allow_unicode=True, sort_keys=False)}),
+            "overrides-write")
 
     return {"ok": True, "model": new_name}
 
