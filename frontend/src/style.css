@@ -13,6 +13,24 @@ h2 { margin: 28px 0 6px; font-size: 13px; font-weight: 600; color: #5b6370; lett
 .meta { color: #8a9199; font-size: 13px; margin: 0; }
 header > button { margin-left: auto; }
 
+/* ── 顶部主按钮（新增厂商）──────────────────────────── */
+button.primary-add {
+  background: #2160f3; color: #fff; border-color: #2160f3;
+}
+button.primary-add:hover { background: #1b52d1; border-color: #1b52d1; color: #fff; }
+
+/* ── 表单弹框（厂商 / 模型，两列栅格）─────────────────── */
+.modal-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; margin-top: 8px; }
+.modal-form label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #5b6370; }
+.modal-form input, .modal-form select { font-size: 14px; padding: 9px 12px; border-radius: 8px; border: 1px solid #d5d9de; }
+.modal-form input:focus, .modal-form select:focus { outline: 2px solid #bfd0ff; border-color: #2160f3; }
+.modal-form .chk { flex-direction: row; align-items: center; gap: 8px; user-select: none; cursor: pointer; }
+.chk-row { grid-column: 1 / -1; display: flex; gap: 20px; }
+.vendor-modal { width: 520px; }
+.validate { margin-top: 12px; font-size: 13px; padding: 8px 12px; border-radius: 8px; }
+.validate.ok { background: #e7f6ec; color: #1f6b39; border: 1px solid #b5e0c4; }
+.validate.err { background: #fdecea; color: #a4271d; border: 1px solid #f3c1bd; }
+
 .search { display: block; width: 100%; margin: 16px 0 4px; font-size: 14px; padding: 9px 14px; border-radius: 8px; border: 1px solid #d5d9de; background: #fff; }
 .search:focus { outline: 2px solid #bfd0ff; border-color: #2160f3; }
 

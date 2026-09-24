@@ -52,16 +52,31 @@ export default function ModelConfigs() {
     toastTimer.current = setTimeout(() => setToast(null), type === "ok" ? 3000 : 6000);
   }, []);
 
-  const load = useCallback(async (refresh = false) => {
+  const load = useCallback(async (refresh = false, retries = 2) => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     setLoading(true);
     try {
-      const r = await api(`/api/model-configs${refresh ? "?refresh=true" : ""}`);
-      if (!r.ok) { showToast("err", `加载失败 HTTP ${r.status}`); return; }
-      const d = await r.json();
-      setConfigs(d.configs ?? []);
-      setCurrent(d.current ?? null);
-    } catch (e) {
-      showToast("err", "请求失败：" + e.message);
+      for (let attempt = 0; ; attempt++) {
+        let r;
+        try {
+          r = await api(`/api/model-configs${refresh ? "?refresh=true" : ""}`);
+        } catch (e) {
+          // 网络瞬时断 → 重试；耗尽才报错
+          if (attempt < retries) { await sleep(500 * (attempt + 1)); continue; }
+          showToast("err", "请求失败：" + e.message);
+          return;
+        }
+        if (r.ok) {
+          const d = await r.json();
+          setConfigs(d.configs ?? []);
+          setCurrent(d.current ?? null);
+          return;
+        }
+        // 5xx（多为 dashboard 瞬时 502）→ 短暂重试；4xx 直接失败
+        if (attempt < retries && r.status >= 500) { await sleep(500 * (attempt + 1)); continue; }
+        showToast("err", `加载失败 HTTP ${r.status}`);
+        return;
+      }
     } finally {
       setLoading(false);
     }
@@ -322,6 +337,83 @@ export default function ModelConfigs() {
   return (
     <div className="page">
       {toast && <div className={`toast ${toast.type}`}>{toast.msg}</div>}
+      {editing && (
+        <div className="modal-mask" onClick={() => setEditing(null)}>
+          <div className="modal vendor-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>{form.id ? "编辑厂商" : "新增厂商"}</h3>
+            <p className="hint">厂商 = 一个自定义端点：接入 URL、API Key 与协议。</p>
+            <div className="modal-form">
+              <label>厂商名 *
+                <input value={form.name} autoFocus
+                       onChange={(e) => setForm({ ...form, name: e.target.value })}
+                       placeholder="如 Ark.cn-beijing.volces.com" />
+              </label>
+              <label>API Base URL *
+                <input value={form.base_url}
+                       onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                       placeholder="https://…" />
+              </label>
+              <label>默认模型 ID
+                <input value={form.model}
+                       onChange={(e) => setForm({ ...form, model: e.target.value })}
+                       placeholder="该厂商默认模型（可空）" />
+              </label>
+              <label>API Key {form.id ? "（留空 = 不改）" : "*"}
+                <input type="password" value={form.api_key}
+                       onChange={(e) => setForm({ ...form, api_key: e.target.value, clearKey: false })}
+                       placeholder={form.id ? "留空保持已保存的 key" : "填入 API Key"} />
+              </label>
+              <label className="chk">
+                <input type="checkbox" checked={form.clearKey} disabled={!form.id}
+                       onChange={(e) => setForm({
+                         ...form,
+                         clearKey: e.target.checked,
+                         api_key: e.target.checked ? "" : form.api_key,
+                       })} />
+                清除已保存的 API Key
+              </label>
+              <label>协议（api_mode）
+                <select value={form.api_mode ?? ""}
+                        onChange={(e) => setForm({ ...form, api_mode: e.target.value })}>
+                  <option value="">自动 / 默认</option>
+                  <option value="chat_completions">chat_completions</option>
+                  <option value="codex_responses">codex_responses</option>
+                  <option value="anthropic_messages">anthropic_messages</option>
+                </select>
+              </label>
+              <label>默认上下文长度（token）
+                <input type="number" value={form.context_length ?? ""}
+                       onChange={(e) => setForm({ ...form, context_length: e.target.value })}
+                       placeholder="可空" />
+              </label>
+              <div className="chk-row">
+                <label className="chk">
+                  <input type="checkbox" checked={form.discover_models ?? true}
+                         onChange={(e) => setForm({ ...form, discover_models: e.target.checked })} />
+                  保存时自动发现模型
+                </label>
+                <label className="chk">
+                  <input type="checkbox" checked={form.make_default}
+                         onChange={(e) => setForm({ ...form, make_default: e.target.checked })} />
+                  设为全局默认
+                </label>
+              </div>
+            </div>
+            {validateResult && (
+              <div className={`validate ${validateResult.ok ? "ok" : "err"}`}>
+                {validateResult.ok ? "✓ 连接正常" : (validateResult.message || "连接失败")}
+              </div>
+            )}
+            <div className="modal-actions">
+              <button className="ghost" onClick={() => setEditing(null)} disabled={busy}>取消</button>
+              <button className="ghost" onClick={handleValidate} disabled={busy}>测试连接</button>
+              <button onClick={handleSave} disabled={busy || !form.name.trim() || !form.base_url.trim()}>
+                {busy ? "处理中…" : (form.id ? "保存" : "创建")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {modal && (
         <div className="modal-mask" onClick={() => setModal(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -395,8 +487,8 @@ export default function ModelConfigs() {
             ? `当前默认：${current.model}${currentVendor ? `（${currentVendor.name}）` : ""}`
             : "未设置默认模型"}
         </p>
-        <button className="primary-add" onClick={() => askAddModel()} disabled={busy}>
-          ＋ 添加模型
+        <button className="primary-add" onClick={() => openCreate()} disabled={busy}>
+          ＋ 新增厂商
         </button>
         <button className="ghost" onClick={() => load(true)} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
@@ -431,7 +523,7 @@ export default function ModelConfigs() {
       {!loading && totalVisible === 0 ? (
         <div className="state-block">
           <p>没有模型。</p>
-          <p className="hint">点「＋ 新增模型配置」添加第一个厂商端点。</p>
+          <p className="hint">点「＋ 新增厂商」添加第一个厂商端点。</p>
         </div>
       ) : (
         <div className="vendors">
