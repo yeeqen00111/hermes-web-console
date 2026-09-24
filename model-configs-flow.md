@@ -144,38 +144,128 @@ flowchart LR
 
 ---
 
-## 6. 关键操作端到端时序（Mermaid sequenceDiagram）
+## 6. 关键操作端到端时序（Mermaid sequenceDiagram，每功能一个）
 
-### 6.1 新增厂商（含填 API Key + 勾设默认）
+> 对齐 §2 前端功能表（§2-1 … §2-10），**每个功能一个时序图**。
+
+### 6.1 加载列表（§2-1）
 ```mermaid
 sequenceDiagram
     participant U as 浏览器 ModelConfigs.jsx
     participant B as 后端 :8000
     participant D as Dashboard 8426
-    U->>B: POST /api/model-configs {name,base_url,...,api_key,make_default}
+    participant S as SQLite hidden_models.db
+    U->>B: GET /api/model-configs(?refresh=true)
     B->>D: GET /api/config/raw
-    B-->>B: yaml 读入，构造/定位 custom_providers 条目
-    B->>D: PUT /api/env (HERMES_CUSTOM_<NAME>_API_KEY = key)
-    B-->>B: entry.key_env = 该变量
+    B-->>B: yaml.safe_load → doc（custom_providers[] + providers{} 合并）
+    B->>S: list_manual + hidden_set + get_default
+    B-->>B: entry.models(discovery) ∪ SQLite custom_models，过滤 hidden，默认置顶
+    opt 默认模型不在 SQLite
+        B->>S: set_default 补存（读时副作用）
+    end
+    B-->>U: {configs[], current:{provider,model,base_url}}
+```
+
+### 6.2 新增厂商（§2-2）
+```mermaid
+sequenceDiagram
+    participant U as 前端
+    participant B as 后端 :8000
+    participant D as Dashboard
+    U->>B: POST /api/model-configs {name,base_url,...,api_key?,make_default}
+    B->>D: GET /api/config/raw
+    B-->>B: 定位/新建 custom_providers 条目, _apply_vendor_fields
+    opt 填了 api_key
+        B->>D: PUT /api/env (HERMES_CUSTOM_<NAME>_API_KEY = key)
+        B-->>B: entry.key_env = 变量名
+    end
     opt make_default
         B-->>B: doc.model.provider/default/base_url = 新厂商
     end
     B->>D: PUT /api/config/raw (yaml.safe_dump 落盘)
-    B-->U: {ok, endpoint_id}
-    B-->>B: 可选 SQLite set_default
-    U->>B: GET /api/model-configs(?refresh)   ← 前端 load(true)
-    B->>D: GET /api/config/raw
-    B-->U: configs[]（含新厂商）
+    B-->>U: {ok, endpoint_id}
+    opt make_default
+        B-->>B: SQLite set_default
+    end
+    U->>B: GET /api/model-configs?refresh → 刷新
 ```
 
-### 6.2 编辑模型改名 / 设思考等级
+### 6.3 编辑厂商（§2-3）
 ```mermaid
 sequenceDiagram
     participant U as 前端
-    participant B as 后端
+    participant B as 后端 :8000
     participant D as Dashboard
+    U->>B: POST /api/model-configs {id:custom:x, name, base_url,..., api_key?, clearKey?}
+    B->>D: GET /api/config/raw
+    B-->>B: 按 id 定位厂商, _apply_vendor_fields
+    alt api_key 填写
+        B->>D: PUT /api/env (写新 key)
+    else clearKey 勾选
+        B->>D: DELETE /api/env (清 key)
+    else 留空不动
+        Note over B: api_key 字段不出现 = 不动
+    end
+    opt make_default
+        B-->>B: doc.model.provider/default/base_url = 该厂商
+    end
+    B->>D: PUT /api/config/raw (落盘)
+    B-->>U: {ok, endpoint_id}
+    U->>B: GET /api/model-configs?refresh → 刷新
+```
+
+### 6.4 测试连接（§2-4）
+```mermaid
+sequenceDiagram
+    participant U as 前端
+    participant B as 后端 :8000
+    participant D as Dashboard
+    U->>B: POST /api/model-configs/validate {name,base_url,model,api_key?,api_mode?}
+    B->>D: POST /api/providers/custom-endpoints/validate (原样透传)
+    D-->>B: {ok:boolean, message?}
+    B-->>U: 原样返回（ok:false → 前端显示 message）
+```
+
+### 6.5 删除厂商（§2-5）
+```mermaid
+sequenceDiagram
+    participant U as 前端
+    participant B as 后端 :8000
+    participant D as Dashboard
+    U->>B: DELETE /api/model-configs/custom:x
+    B->>D: GET /api/config/raw
+    B-->>B: 从 custom_providers(摘除)/providers(删key) 移除条目
+    B->>D: PUT /api/config/raw (落盘)
+    B-->>U: {ok:true}
+    U->>B: GET /api/model-configs?refresh → 刷新（厂商消失）
+```
+
+### 6.6 添加模型（§2-6）
+```mermaid
+sequenceDiagram
+    participant U as 前端
+    participant B as 后端 :8000
+    participant S as SQLite
+    U->>B: POST /api/model-configs/custom:x/models {name,display_name?,context_length?,reasoning_effort?}
+    B->>S: add_custom(x, name, ...)   ← 只落本地，不调 Hermes
+    B-->>U: {ok, model:name}
+    U->>B: GET /api/model-configs?refresh → 刷新（新模型进入列表）
+    Note over B: 注意：此处 reasoning_effort 仅存 SQLite，<br/>不写 agent.reasoning_overrides → 运行时暂不生效
+```
+
+### 6.7 编辑模型 / 改名（§2-7）
+```mermaid
+sequenceDiagram
+    participant U as 前端
+    participant B as 后端 :8000
+    participant D as Dashboard
+    participant S as SQLite
     U->>B: PUT /api/model-configs/custom:x/models/{旧名}
-    B-->>B: SQLite update_full/add_custom(new)
+    alt 已有手动条目
+        B->>S: update_full（全字段覆盖，空=清空）
+    else 首次编辑 config/discovery 模型
+        B->>S: add_custom(new)
+    end
     B-->>B: unhide 新名；改名则 hide 旧名
     opt 填了 reasoning_effort
         B->>D: GET /api/config/raw
@@ -183,28 +273,53 @@ sequenceDiagram
         B->>D: PUT /api/config/raw
     end
     opt 改的是当前默认
-        B-->>B: SQLite set_default(新名)
-        B->>D: GET+PUT /api/config/raw (model.default=新名)
+        B->>S: set_default(new)
+        B->>D: GET+PUT /api/config/raw (model.default=new)
     end
-    B-->U: {ok, model: 新名}
+    B-->>U: {ok, model:新名}
     U->>B: GET /api/model-configs?refresh → 刷新
 ```
 
-### 6.3 设默认模型
+### 6.8 设默认模型（§2-8）
 ```mermaid
 sequenceDiagram
     participant U as 前端
-    participant B as 后端
+    participant B as 后端 :8000
     participant D as Dashboard
+    participant S as SQLite
     U->>B: POST /api/model-configs/custom:x/default?model=glm
     B->>D: POST /api/model/set {scope:main, provider:custom:x, model:glm}
     alt confirm_required
         D-->>B: {confirm_required, confirm_message}
-        B-->>U: {"confirm_required":true,...}（前端二次确认）
+        B-->>U: confirm_required:true（前端二次确认）
     else ok
-        B-->>B: SQLite set_default(custom:x, glm)
+        B->>S: set_default(x, glm)
         B-->>U: {ok}
     end
+    U->>B: GET /api/model-configs?refresh → 刷新
+```
+
+### 6.9 删除单个模型（隐藏）（§2-9）
+```mermaid
+sequenceDiagram
+    participant U as 前端
+    participant B as 后端 :8000
+    participant S as SQLite
+    U->>B: POST /api/model-configs/custom:x/models/{m}/hide
+    B->>S: hide_model(x, m)（INSERT hidden_models）← 只落本地
+    B-->>U: {ok, hidden:true}
+    U->>B: GET /api/model-configs?refresh → 刷新（该模型从列表消失）
+```
+
+### 6.10 批量删除（隐藏）（§2-10）
+```mermaid
+sequenceDiagram
+    participant U as 前端
+    participant B as 后端 :8000
+    participant S as SQLite
+    U->>B: POST /api/model-configs/custom:x/models/hide-batch {models:[...]}
+    B->>S: hide_model × N（逐项幂等, 已隐藏忽略）
+    B-->>U: {ok, count:N}
     U->>B: GET /api/model-configs?refresh → 刷新
 ```
 
