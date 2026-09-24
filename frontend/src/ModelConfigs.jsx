@@ -158,6 +158,8 @@ export default function ModelConfigs() {
       showToast("ok", form.id ? "已保存" : `已创建（id=${d.endpoint_id}）`);
       setEditing(null);
       await load(true);
+    } catch (e) {
+      showToast("err", "保存失败：" + e.message);
     } finally {
       setBusy(false);
     }
