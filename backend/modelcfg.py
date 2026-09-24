@@ -51,6 +51,27 @@ def _save_doc(doc: Dict[str, Any]) -> None:
             "raw-save")
 
 
+def _sync_reasoning_override(old_id: Optional[str], new_id: Optional[str],
+                             effort: Optional[str]) -> None:
+    """单一收口：load config → 确保 agent.reasoning_overrides 是 dict → 弹出旧键、
+    置位/删除新键 → 落盘。add = _(None,name,effort)；rename = _(old,new,effort)；
+    delete = _(model,None,None)。effort 为 None 时删除新键。"""
+    doc = _load_doc()
+    agent_cfg = doc.setdefault("agent", {})
+    ov = agent_cfg.get("reasoning_overrides")
+    if not isinstance(ov, dict):
+        ov = {}
+    if old_id and old_id != new_id:
+        ov.pop(old_id, None)
+    if new_id:
+        if effort:
+            ov[new_id] = effort
+        else:
+            ov.pop(new_id, None)
+    agent_cfg["reasoning_overrides"] = ov
+    _save_doc(doc)
+
+
 def _all_vendor_entries(doc: Dict[str, Any]) -> List[Any]:
     """合并两个段的厂商条目。返回 (entry, section, key) 三元组——entry 是 doc 内的
     **原引用**（改动直接作用于 doc，保存时生效）；key 仅 providers 段有。"""
@@ -93,7 +114,7 @@ class ModelConfigBody(BaseModel):
     api_key: Optional[str] = None
     api_mode: Optional[str] = None      # ""|chat_completions|codex_responses|anthropic_messages
     context_length: Optional[int] = None
-    discover_models: bool = True
+    discover_models: Optional[bool] = None   # None=不动（与 api_mode 同模式）；否则才写
     models: Optional[List[str]] = None
     make_default: bool = False
 
@@ -137,7 +158,10 @@ def list_model_configs(refresh: bool = False):
             meta = (vend.get("models") or {}).get(cur_model, {}) if isinstance(vend.get("models"), dict) else {}
             hidden_store.set_default(cur_provider, cur_model,
                                      None, meta.get("context_length"), meta.get("reasoning_effort"))
-            default_entry = hidden_store.get_default()
+            # 刚用已知参数写完，直接构造，省一次 SQLite re-read
+            default_entry = {"vendor": cur_provider, "model": cur_model, "display_name": None,
+                             "context_length": meta.get("context_length"),
+                             "reasoning_effort": meta.get("reasoning_effort")}
 
     configs = []
     for e, section, key in _all_vendor_entries(doc):
@@ -220,7 +244,8 @@ def _apply_vendor_fields(entry: Dict[str, Any], body: ModelConfigBody) -> None:
             entry.pop("api_mode", None)
     if body.context_length and body.context_length > 0:
         entry["context_length"] = int(body.context_length)
-    entry["discover_models"] = bool(body.discover_models)
+    if body.discover_models is not None:
+        entry["discover_models"] = bool(body.discover_models)
     # 模型清单不在 config 层写（SQLite custom_models 管理展示层模型）
     # api_key 的写入/清除在 upsert 主函数里走 PUT/DELETE /api/env（.env + key_env 引用，
     # 与官方 upsert 同款生命周期），不在此处处理。
@@ -254,22 +279,8 @@ def upsert_model_config(body: ModelConfigBody):
             r = hc.request("DELETE", "/api/env", json={"key": key_var}, timeout=30)
             target.pop("key_env", None)
             target.pop("api_key", None)
-    elif not is_new:
-        # 编辑但没动 api_key：若厂商被改名，把旧 key_env 变量迁移到新变量名，
-        # 否则 entry.key_env 仍指向旧变量、新名算出来的变量名从未创建（.env 孤儿）。
-        old_key_env = target.get("key_env")
-        if old_key_env and old_key_env != key_var:
-            get = hc.request("GET", "/api/env", json={"key": old_key_env})
-            old_val = ""
-            try:
-                old_val = str(get.json().get("value") or get.json().get(old_key_env) or "")
-            except Exception:
-                old_val = ""
-            if old_val:
-                r = hc.request("PUT", "/api/env", json={"key": key_var, "value": old_val})
-                if r.status_code < 400:
-                    hc.request("DELETE", "/api/env", json={"key": old_key_env}, timeout=30)
-                    target["key_env"] = key_var
+    # 编辑但没动 api_key：保留 entry.key_env 旧指针不动——运行时按字面指针读
+    # （os.environ.get(entry['key_env'])），不按厂商名重推导，旧变量仍有效。
 
     if body.make_default:
         model_cfg = doc.setdefault("model", {})
@@ -400,19 +411,9 @@ def add_vendor_model(vendor_id: str, body: AddModelBody):
         raise HTTPException(status_code=400,
                             detail=f"思考等级非法：{body.reasoning_effort}（合法：{', '.join(VALID_EFFORTS)}）")
     add_custom(vendor_id, name, body.display_name, ctx_len, effort)
-    # 思考等级运行时生效：写 agent.reasoning_overrides（与 rename 路径同款）
+    # 思考等级运行时生效：写 agent.reasoning_overrides
     if effort:
-        import yaml as _y
-        doc = _load_doc()
-        agent_cfg = doc.setdefault("agent", {})
-        ov = agent_cfg.get("reasoning_overrides")
-        if not isinstance(ov, dict):
-            ov = {}
-        ov[name] = effort
-        agent_cfg["reasoning_overrides"] = ov
-        _raw_ok(hc.request("PUT", "/api/config/raw",
-                           json={"yaml_text": _y.safe_dump(doc, allow_unicode=True, sort_keys=False)}),
-                "overrides-write")
+        _sync_reasoning_override(None, name, effort)
     return {"ok": True, "model": name}
 
 
@@ -441,21 +442,19 @@ def rename_vendor_model(vendor_id: str, model_id: str, body: AddModelBody):
     if new_name != model_id:
         _hide(vendor_id, model_id)
 
-    # 默认模型跟随改名（SQLite 标记 + config model 段）
+    # 默认模型跟随改名 + 思考等级运行时生效：同一份 doc 一次读、两块内联改、一次落盘，
+    # 避免「改 model.default」和「改 reasoning_overrides」各做一轮 GET/PUT（4 RTT→2 RTT）。
+    doc = _load_doc()
+
     d = hidden_store.get_default()
     if d and d.get("vendor") == vendor_id and d.get("model") == model_id and new_name != model_id:
         hidden_store.set_default(vendor_id, new_name)
-        doc = _load_doc()
         model_cfg = doc.get("model") or {}
         if str(model_cfg.get("provider", "")) == vendor_id and str(model_cfg.get("default", "")) == model_id:
             model_cfg["default"] = new_name
             doc["model"] = model_cfg
-            _save_doc(doc)
 
-    # 思考等级运行时生效：写 agent.reasoning_overrides（旧名清理、新名置位；清空则删除）
-    import yaml as _y
-    doc2 = _load_doc()
-    agent_cfg = doc2.setdefault("agent", {})
+    agent_cfg = doc.setdefault("agent", {})
     ov = agent_cfg.get("reasoning_overrides")
     if not isinstance(ov, dict):
         ov = {}
@@ -465,9 +464,7 @@ def rename_vendor_model(vendor_id: str, model_id: str, body: AddModelBody):
     else:
         ov.pop(new_name, None)
     agent_cfg["reasoning_overrides"] = ov
-    _raw_ok(hc.request("PUT", "/api/config/raw",
-                       json={"yaml_text": _y.safe_dump(doc2, allow_unicode=True, sort_keys=False)}),
-            "overrides-write")
+    _save_doc(doc)
 
     return {"ok": True, "model": new_name}
 
@@ -478,17 +475,7 @@ def delete_vendor_model(vendor_id: str, model_id: str):
     delete_custom(vendor_id, model_id)
     _unhide(vendor_id, model_id)
     # 清掉 config.yaml 里指向已删模型的思考等级 override，避免同名模型意外继承
-    import yaml as _y
-    doc = _load_doc()
-    agent_cfg = doc.get("agent") or {}
-    ov = agent_cfg.get("reasoning_overrides")
-    if isinstance(ov, dict) and model_id in ov:
-        ov.pop(model_id, None)
-        agent_cfg["reasoning_overrides"] = ov
-        doc["agent"] = agent_cfg
-        _raw_ok(hc.request("PUT", "/api/config/raw",
-                           json={"yaml_text": _y.safe_dump(doc, allow_unicode=True, sort_keys=False)}),
-                "overrides-cleanup")
+    _sync_reasoning_override(model_id, None, None)
     return {"ok": True}
 
 
