@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyTurnEvent, createSSEParser, isTerminalEvent, mergeHistory, messagePage, readChatStream, reconcileTurns } from "./chat-stream.js";
+import * as chatStream from "./chat-stream.js";
+
+// A namespace import keeps the existing SSE regressions runnable before the new export exists.
+const { applyTurnEvent, createSSEParser, historyForDisplay, isTerminalEvent, mergeHistory, messagePage, readChatStream, reconcileTurns } = chatStream;
 
 const encoder = new TextEncoder();
 const envelope = (type, payload, extra = {}) => ({ type, session_id: "live/id", stored_session_id: "stored/id", profile: "配置 A", payload, ...extra });
@@ -14,7 +17,26 @@ function body(chunks) {
   });
 }
 
-const historyMessage = (id, role = "user", text = id) => ({ id, role, text, content: text });
+const historyMessage = (id, role = "user", text = id, extra = {}) => ({
+  id, role, text, notices: [], hidden: false, tools: [], toolCallId: null, toolName: "", ...extra,
+});
+const parseHistory = (messages) => messagePage({
+  messages, pagination: { returned: messages.length, limit: Math.max(1, messages.length), offset: 0, order: "latest" },
+}).messages;
+const finalItem = (text = "恢复答案", extra = {}) => ({
+  type: "message", role: "assistant", phase: "final", content: [{ type: "output_text", text }], ...extra,
+});
+const call = (id, name = "search") => ({ id, type: "function", function: { name, arguments: "PRIVATE_ARGS" } });
+const displayTools = (messages) => messages.flatMap((message) => message.tools);
+function freezeHistory(messages) {
+  for (const message of messages) {
+    for (const tool of message.tools) Object.freeze(tool);
+    Object.freeze(message.tools);
+    Object.freeze(message.notices);
+    Object.freeze(message);
+  }
+  return Object.freeze(messages);
+}
 
 test("SSE parses every possible CRLF chunk boundary and multiline data", () => {
   const source = ': keepalive\r\nevent: message.delta\r\ndata: {\r\ndata: "payload":{"text":"你好"}}\r\n\r\n';
@@ -119,29 +141,37 @@ test("malformed JSON and reader errors reject rather than report success", async
   assert.equal(partial, "部分结果");
 });
 
-test("history filtering does not change raw offset or chronological order", () => {
+test("history preserves raw row IDs and order while display filtering leaves pagination unchanged", () => {
   const result = messagePage({
     messages: [
       { id: "1", role: "system", content: "system" },
       { id: "2", role: "user", content: "原文", display_content: "展示文本" },
-      { id: "3", role: "tool", content: "internal" },
+      { id: "3", role: "tool", content: "internal", tool_call_id: "orphan", name: "search" },
       { id: "4", role: "assistant", content: "secret", display_kind: "hidden" },
       { id: "5", role: "assistant", content: "答复" },
+      { id: "6", role: "assistant", content: "" },
     ],
-    pagination: { returned: 5, limit: 5, offset: 50, order: "latest" },
+    pagination: { returned: 6, limit: 6, offset: 50, order: "latest" },
   });
-  assert.equal(result.offset, 55);
+  assert.equal(result.offset, 56);
   assert.equal(result.hasMore, true);
-  assert.deepEqual(result.messages.map((message) => message.id), ["2", "5"]);
-  assert.equal(result.messages[0].text, "展示文本");
-  assert.equal(result.messages[0].content, "原文");
+  assert.deepEqual(result.messages.map((message) => message.id), ["1", "2", "3", "4", "5", "6"]);
+  assert.deepEqual(result.messages[1], historyMessage("2", "user", "展示文本"));
+  assert.deepEqual(result.messages[5], historyMessage("6", "assistant", ""));
+  for (const message of result.messages) {
+    assert.deepEqual(Object.keys(message).sort(), Object.keys(historyMessage("shape")).sort());
+    assert.equal(typeof message.hidden, "boolean");
+  }
+  assert.deepEqual(historyForDisplay(result.messages).map((message) => message.id), ["2", "3", "5"]);
 });
 
-test("fully hidden pages still advance; malformed history is not a successful empty page", () => {
-  const result = messagePage({ messages: [{ id: 1, role: "tool" }], pagination: { returned: 1, limit: 1, offset: 0, order: "latest" } });
-  assert.deepEqual(result.messages, []);
+test("fully hidden pages retain IDs and advance; malformed history is not a successful empty page", () => {
+  const result = messagePage({ messages: [{ id: 1, role: "tool", hidden: true }], pagination: { returned: 1, limit: 1, offset: 0, order: "latest" } });
+  assert.deepEqual(result.messages.map((message) => message.id), ["1"]);
+  assert.equal(result.messages[0].hidden, true);
   assert.equal(result.offset, 1);
   assert.equal(result.hasMore, true);
+  assert.deepEqual(historyForDisplay(result.messages), []);
   assert.throws(() => messagePage({}), /格式不正确/);
   assert.throws(() => messagePage({ messages: [], pagination: { returned: 0, limit: 50, offset: 0, order: "oldest" } }), /格式不正确/);
 });
@@ -237,4 +267,534 @@ test("failed and interrupted completion preserve partial content and never claim
     assert.equal(turn.status, status);
     assert.equal(turn.delivery, "unknown");
   }
+});
+
+test("historyForDisplay is exported independently of stream parsing", () => {
+  assert.equal(typeof historyForDisplay, "function", "export historyForDisplay for canonical history rows");
+});
+
+test("plain strings, including JSON-looking text and special characters, are not reparsed", () => {
+  for (const content of [' {"text":"不是投影"} \n', '[{"type":"text","text":"原文"}]', "汉字 café ' \" ; --\n保留空格  "]) {
+    assert.deepEqual(parseHistory([{ id: 0, role: "assistant", content }]), [historyMessage("0", "assistant", content)]);
+  }
+});
+
+for (const field of ["text", "output_text", "content", "message"]) {
+  test(`canonical body recursively extracts the ${field} field`, () => {
+    const [row] = parseHistory([{ id: field, role: "assistant", content: { [field]: { content: [{ text: "规范正文" }] } } }]);
+    assert.equal(row.text, "规范正文");
+    assert.deepEqual(row.notices, []);
+    assert.equal(Object.hasOwn(row, "content"), false);
+  });
+}
+
+test("nested arrays keep confirmed text in order without object coercion", () => {
+  const [row] = parseHistory([{ id: "nested", role: "assistant", content: [
+    "甲", [{ type: "text", text: "乙" }, { type: "output_text", text: "丙" }],
+    { message: { content: [{ output_text: "丁" }, "戊"] } },
+  ] }]);
+  assert.equal(row.text.replace(/\s/g, ""), "甲乙丙丁戊");
+  assert.deepEqual(row.notices, []);
+  assert.doesNotMatch(JSON.stringify(row), /\[object Object\]/);
+});
+
+for (const [type, payload, notice] of [
+  ["image_url", { image_url: { url: "https://media.invalid/PRIVATE_IMAGE" } }, "图片内容（暂不预览）"],
+  ["image", { source: { type: "base64", data: "PRIVATE_IMAGE_BASE64" } }, "图片内容（暂不预览）"],
+  ["input_audio", { input_audio: { data: "PRIVATE_AUDIO_BASE64", format: "wav" } }, "音频内容（暂不播放）"],
+  ["audio", { url: "https://media.invalid/PRIVATE_AUDIO" }, "音频内容（暂不播放）"],
+  ["file", { file_data: "data:application/pdf;base64,PRIVATE_FILE", filename: "PRIVATE_FILENAME" }, "文件内容（暂不预览）"],
+]) {
+  test(`${type} becomes a notice, preserves adjacent text, and never retains media payloads`, () => {
+    const rows = parseHistory([{ id: type, role: "assistant", content: ["前", { type, ...payload }, "后"] }]);
+    assert.equal(rows[0].text.replace(/\s/g, ""), "前后");
+    assert.deepEqual(rows[0].notices, [notice]);
+    assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_|https:|data:|base64|\[object Object\]/);
+    const visible = historyForDisplay(rows);
+    assert.equal(visible.length, 1);
+    assert.deepEqual(visible[0].notices, [notice]);
+    assert.doesNotMatch(JSON.stringify(visible), /PRIVATE_|https:|data:|base64/);
+  });
+}
+
+test("unknown objects and invalid body scalars produce a safe notice rather than a dump", () => {
+  for (const content of [{}, { unknown: { secret: "PRIVATE_UNKNOWN" } }, 42, true, { text: 42 }]) {
+    const rows = parseHistory([{ id: "unknown", role: "assistant", content }]);
+    assert.equal(rows[0].text, "");
+    assert.deepEqual(rows[0].notices, ["暂不支持的内容"]);
+    assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_UNKNOWN|\[object Object\]/);
+    assert.equal(historyForDisplay(rows).length, 1, "a notice-only row remains visible");
+  }
+});
+
+test("null, absent, empty string, and empty array bodies retain IDs without blank bubbles", () => {
+  const rows = parseHistory([null, undefined, "", []].map((content, index) => ({ id: index, role: "assistant", content })));
+  assert.deepEqual(rows, [0, 1, 2, 3].map((id) => historyMessage(String(id), "assistant", "")));
+  assert.deepEqual(historyForDisplay(rows), []);
+  assert.deepEqual(historyForDisplay([]), []);
+});
+
+for (const type of ["thinking", "reasoning", "redacted_thinking"]) {
+  test(`${type} is never body text and only yields a thinking-only notice without an answer or tools`, () => {
+    const thought = { type, text: "PRIVATE_THOUGHT", thinking: "PRIVATE_THOUGHT", data: "PRIVATE_THOUGHT" };
+    const rows = parseHistory([
+      { id: "thought", role: "assistant", content: [thought] },
+      { id: "answer", role: "assistant", content: [thought, { type: "text", text: "正式回答" }] },
+      { id: "tool", role: "assistant", content: [thought], tool_calls: [call("thought-call")] },
+    ]);
+    assert.equal(rows[0].text, "");
+    assert.deepEqual(rows[0].notices, ["仅含思考记录"]);
+    assert.equal(rows[1].text, "正式回答");
+    assert.deepEqual(rows[1].notices, []);
+    assert.equal(rows[2].text, "");
+    assert.deepEqual(rows[2].notices, []);
+    assert.equal(rows[2].tools.length, 1);
+    assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_THOUGHT|PRIVATE_ARGS/);
+  });
+}
+
+test("an explicit display projection wins even when null or empty and never revives raw or sidecar text", () => {
+  for (const display_content of [null, "", [], "公开投影", { text: "公开投影" }]) {
+    const rows = parseHistory([{
+      id: "projection", role: "assistant", display_content, content: "PRIVATE_RAW",
+      codex_message_items: [finalItem("PRIVATE_SIDECAR")],
+    }]);
+    assert.equal(rows[0].text, display_content === "公开投影" || display_content?.text ? "公开投影" : "");
+    assert.deepEqual(rows[0].notices, []);
+    assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_RAW|PRIVATE_SIDECAR/);
+    assert.equal(historyForDisplay(rows).length, rows[0].text ? 1 : 0);
+  }
+});
+
+test("malformed sidecars are ignored when a projection, existing body, or hidden flag takes priority", () => {
+  for (const [fields, expectedText] of [
+    [{ display_content: null, content: "PRIVATE_RAW" }, ""],
+    [{ display_content: "公开投影", content: "PRIVATE_RAW" }, "公开投影"],
+    [{ content: "已有正文" }, "已有正文"],
+    [{ hidden: true, content: "PRIVATE_HIDDEN" }, ""],
+  ]) {
+    const [row] = parseHistory([{ id: "priority", role: "assistant", codex_message_items: "{PRIVATE_BAD_SIDECAR", ...fields }]);
+    assert.equal(row.text, expectedText);
+    assert.deepEqual(row.notices, []);
+    assert.doesNotMatch(JSON.stringify(row), /PRIVATE_/);
+  }
+});
+
+test("hidden flags, hidden display kinds, and system rows cannot be revived by a projection or sidecar", () => {
+  for (const flags of [{ hidden: true }, { display_kind: "hidden" }, { display_kind: "system" }, { display_kind: "tool" }, { role: "system" }]) {
+    const rows = parseHistory([{
+      id: "hidden", role: "assistant", content: "PRIVATE_RAW_HIDDEN", display_content: "PRIVATE_PROJECTION",
+      codex_message_items: [finalItem("PRIVATE_SIDECAR")], tool_calls: [call("hidden-call", "PRIVATE_TOOL")], ...flags,
+    }]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, "hidden");
+    assert.equal(rows[0].hidden, true);
+    assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_/);
+    assert.deepEqual(historyForDisplay(rows), []);
+  }
+});
+
+for (const encoding of ["array", "json"]) {
+  test(`codex ${encoding} sidecars recover only final assistant message text from a truly empty body`, () => {
+    const items = [
+      finalItem("PRIVATE_ANALYSIS", { phase: "analysis" }), finalItem("PRIVATE_COMMENTARY", { phase: "commentary" }),
+      finalItem("PRIVATE_USER", { role: "user" }), finalItem("PRIVATE_TOOL_RESULT", { type: "function_call_output" }),
+      finalItem("unused", { content: [{ type: "text", text: "正式" }, { type: "output_text", text: "答案" }] }),
+      finalItem("无阶段", { phase: undefined }),
+    ];
+    for (const content of [undefined, null, "", []]) {
+      const rows = parseHistory([{
+        id: "sidecar", role: "assistant", content, codex_message_items: encoding === "json" ? JSON.stringify(items) : items,
+      }]);
+      assert.equal(rows[0].text.replace(/\s/g, ""), "正式答案无阶段");
+      assert.deepEqual(rows[0].notices, []);
+      assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_|codex_message_items/);
+    }
+  });
+}
+
+test("a body with text, media, an unknown structure, or reasoning blocks sidecar recovery", () => {
+  for (const content of ["已有正文", [{ type: "image_url", image_url: { url: "https://media.invalid/PRIVATE_IMAGE" } }], { unknown: true }, [{ type: "reasoning", text: "PRIVATE_REASONING" }]]) {
+    const [row] = parseHistory([{ id: "body-priority", role: "assistant", content, codex_message_items: [finalItem("PRIVATE_RECOVERED")] }]);
+    assert.doesNotMatch(JSON.stringify(row), /PRIVATE_/);
+    if (typeof content === "string") assert.equal(row.text, content);
+    else {
+      assert.equal(row.text, "");
+      assert.equal(row.notices.length, 1, "non-text content must not silently disappear");
+    }
+  }
+});
+
+test("reasoning, analysis and commentary sidecars yield a notice, never an answer", () => {
+  for (const items of [
+    [finalItem("PRIVATE_ANALYSIS", { phase: "analysis" }), finalItem("PRIVATE_COMMENTARY", { phase: "commentary" })],
+    [{ type: "reasoning", summary: [{ type: "summary_text", text: "PRIVATE_REASONING" }] }],
+  ]) {
+    for (const codex_message_items of [items, JSON.stringify(items)]) {
+      const rows = parseHistory([{ id: "analysis", role: "assistant", content: "", codex_message_items }]);
+      assert.equal(rows[0].text, "");
+      assert.deepEqual(rows[0].notices, ["仅含思考记录"]);
+      assert.equal(historyForDisplay(rows).length, 1);
+      assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_/);
+      assert.doesNotMatch(JSON.stringify(historyForDisplay(rows)), /PRIVATE_/);
+    }
+  }
+});
+
+test("malformed dedicated sidecars yield unsupported notices without breaking neighboring rows", () => {
+  for (const codex_message_items of ["{bad json", "{}", '"PRIVATE_SCALAR"', 42, { items: [] }, [finalItem(42)]]) {
+    const rows = parseHistory([
+      { id: "bad", role: "assistant", content: "", codex_message_items },
+      { id: "good", role: "assistant", content: "下一条" },
+    ]);
+    assert.equal(rows[0].text, "");
+    assert.deepEqual(rows[0].notices, ["暂不支持的内容"]);
+    assert.equal(rows[1].text, "下一条");
+    assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_SCALAR|bad json/);
+  }
+});
+
+test("tool calls come only from assistant metadata and tool results retain identifiers, never raw bodies", () => {
+  const rows = parseHistory([
+    { id: "assistant", role: "assistant", content: "", tool_calls: [call(7, "nested-name"), { id: "flat", name: "flat-name", arguments: "PRIVATE_FLAT_ARGS" }] },
+    { id: "user", role: "user", content: "问题", tool_calls: [call("ignored", "PRIVATE_USER_TOOL")] },
+    { id: "embedded", role: "assistant", content: [{ type: "tool_use", id: "not-a-call", name: "PRIVATE_EMBEDDED_TOOL", input: { value: "PRIVATE_INPUT" } }] },
+    { id: "result", role: "tool", name: "nested-name", tool_call_id: 7, content: "https://result.invalid/PRIVATE_RESULT", tool_calls: [call("ignored-result")] },
+  ]);
+  assert.deepEqual(rows[0].tools.map(({ id, name }) => ({ id, name })), [{ id: "7", name: "nested-name" }, { id: "flat", name: "flat-name" }]);
+  assert.deepEqual(rows[1].tools, []);
+  assert.deepEqual(rows[2].tools, []);
+  assert.equal(rows[3].toolCallId, "7");
+  assert.equal(rows[3].toolName, "nested-name");
+  assert.equal(rows[3].text, "");
+  assert.deepEqual(rows[3].tools, []);
+  assert.doesNotMatch(JSON.stringify(rows), /PRIVATE_|https:/);
+});
+
+test("tool results loaded before calls become associated only after raw pages merge, without mutating history", () => {
+  const latest = parseHistory([
+    { id: "result", role: "tool", tool_call_id: "cross-page", name: "search", content: "PRIVATE_RESULT" },
+    { id: "answer", role: "assistant", content: "完成答复" },
+  ]);
+  const initial = historyForDisplay(latest);
+  const initialSnapshot = structuredClone(initial);
+  assert.deepEqual(displayTools(initial).map(({ id, hasResult, orphan }) => ({ id, hasResult, orphan })), [
+    { id: "cross-page", hasResult: true, orphan: true },
+  ]);
+  const older = parseHistory([
+    { id: "user", role: "user", content: "问题" },
+    { id: "call", role: "assistant", content: "", tool_calls: [call("cross-page")] },
+  ]);
+  const merged = mergeHistory(latest, older, true);
+  const before = structuredClone(merged);
+  freezeHistory(merged);
+  const visible = historyForDisplay(merged);
+  assert.deepEqual(visible.map(({ id }) => id), ["user", "call", "answer"]);
+  const tools = displayTools(visible);
+  assert.equal(tools.length, 1);
+  assert.deepEqual(Object.keys(tools[0]).sort(), ["key", "id", "name", "hasResult", "orphan"].sort());
+  assert.equal(typeof tools[0].key, "string");
+  assert.ok(tools[0].key.length > 0);
+  assert.deepEqual({ ...tools[0], key: "stable-key" }, { key: "stable-key", id: "cross-page", name: "search", hasResult: true, orphan: false });
+  assert.deepEqual(historyForDisplay(merged), visible);
+  assert.deepEqual(merged, before);
+  assert.deepEqual(initial, initialSnapshot, "deriving another page must not mutate an earlier display snapshot");
+  assert.doesNotMatch(JSON.stringify(visible), /PRIVATE_|running|success/);
+});
+
+test("same-named tools associate by ID, duplicate result rows do not duplicate summaries, and unmatched IDs remain orphaned", () => {
+  const rows = parseHistory([
+    { id: "u", role: "user", content: "问题" },
+    { id: "calls", role: "assistant", content: "", tool_calls: [call("a"), call("b")] },
+    { id: "b-result", role: "tool", tool_call_id: "b", name: "search", content: "PRIVATE_B_RESULT" },
+    { id: "b-result-again", role: "tool", tool_call_id: "b", name: "search", content: "PRIVATE_B_REPEAT" },
+    { id: "c-result", role: "tool", tool_call_id: "c", name: "search", content: "PRIVATE_C_RESULT" },
+  ]);
+  const visible = historyForDisplay(rows);
+  assert.deepEqual(visible.map(({ id }) => id), ["u", "calls", "c-result"]);
+  const tools = displayTools(visible);
+  assert.deepEqual(tools.map(({ id, name, hasResult, orphan }) => ({ id, name, hasResult, orphan })), [
+    { id: "a", name: "search", hasResult: false, orphan: false },
+    { id: "b", name: "search", hasResult: true, orphan: false },
+    { id: "c", name: "search", hasResult: true, orphan: true },
+  ]);
+  assert.equal(new Set(tools.map(({ key }) => key)).size, tools.length);
+  for (const tool of tools) assert.deepEqual(Object.keys(tool).sort(), ["key", "id", "name", "hasResult", "orphan"].sort());
+  const refreshed = mergeHistory(rows, rows.slice(1));
+  const overlapping = mergeHistory(refreshed, rows.slice(0, 3), true);
+  assert.equal(overlapping.length, rows.length);
+  assert.deepEqual(displayTools(historyForDisplay(overlapping)), tools);
+  assert.doesNotMatch(JSON.stringify(visible), /PRIVATE_|running|success/);
+});
+
+test("missing call IDs never associate by name and still yield distinct safe summaries", () => {
+  const rows = parseHistory([
+    { id: "u", role: "user", content: "问题" },
+    { id: "call-without-id", role: "assistant", tool_calls: [call(undefined)] },
+    { id: "result-without-id", role: "tool", name: "search", content: "PRIVATE_RESULT" },
+  ]);
+  const tools = displayTools(historyForDisplay(rows));
+  assert.equal(tools.length, 2);
+  assert.deepEqual(tools.map(({ name, hasResult, orphan }) => ({ name, hasResult, orphan })), [
+    { name: "search", hasResult: false, orphan: false },
+    { name: "search", hasResult: true, orphan: true },
+  ]);
+  assert.equal(new Set(tools.map(({ key }) => key)).size, 2);
+  assert.doesNotMatch(JSON.stringify(tools), /PRIVATE_|running|success/);
+});
+
+test("tool association cannot cross a user boundary, including a hidden or empty user row", () => {
+  for (const boundary of [{ content: "第二问" }, { content: "PRIVATE_HIDDEN_USER", hidden: true }, { content: "" }]) {
+    const rows = parseHistory([
+      { id: "u1", role: "user", content: "第一问" },
+      { id: "call", role: "assistant", tool_calls: [call("reused-id")] },
+      { id: "u2", role: "user", ...boundary },
+      { id: "result", role: "tool", tool_call_id: "reused-id", name: "search", content: "PRIVATE_RESULT" },
+    ]);
+    const tools = displayTools(historyForDisplay(rows));
+    assert.deepEqual(tools.map(({ id, hasResult, orphan }) => ({ id, hasResult, orphan })), [
+      { id: "reused-id", hasResult: false, orphan: false },
+      { id: "reused-id", hasResult: true, orphan: true },
+    ]);
+    assert.equal(new Set(tools.map(({ key }) => key)).size, 2, "keys must distinguish separate user segments");
+  }
+});
+
+test("hidden tool results cannot complete visible calls and hidden calls cannot consume visible orphan results", () => {
+  const rows = parseHistory([
+    { id: "u", role: "user", content: "问题" },
+    { id: "call", role: "assistant", tool_calls: [call("visible")] },
+    { id: "hidden-result", role: "tool", tool_call_id: "visible", hidden: true, content: "PRIVATE_HIDDEN_RESULT" },
+    { id: "hidden-call", role: "assistant", tool_calls: [call("hidden", "PRIVATE_HIDDEN_TOOL")], hidden: true },
+    { id: "visible-result", role: "tool", tool_call_id: "hidden", name: "search", content: "PRIVATE_RESULT" },
+  ]);
+  const visible = historyForDisplay(rows);
+  assert.deepEqual(visible.map(({ id }) => id), ["u", "call", "visible-result"]);
+  assert.deepEqual(displayTools(visible).map(({ id, hasResult, orphan }) => ({ id, hasResult, orphan })), [
+    { id: "visible", hasResult: false, orphan: false },
+    { id: "hidden", hasResult: true, orphan: true },
+  ]);
+  assert.doesNotMatch(JSON.stringify(visible), /PRIVATE_/);
+});
+
+test("raw pagination offsets use returned, including empty responses and non-visible rows", () => {
+  for (const [returned, limit, offset, expectedOffset, hasMore] of [[8, 8, 20, 28, true], [2, 8, 20, 22, false], [0, 8, 20, 20, false]]) {
+    const result = messagePage({
+      messages: returned ? [{ id: "hidden", role: "assistant", hidden: true }, { id: "empty", role: "assistant", content: "" }] : [],
+      pagination: { returned, limit, offset, order: "latest" },
+    });
+    assert.equal(result.offset, expectedOffset);
+    assert.equal(result.hasMore, hasMore);
+    assert.deepEqual(result.messages.map(({ id }) => id), returned ? ["hidden", "empty"] : []);
+    assert.deepEqual(historyForDisplay(result.messages), []);
+  }
+});
+
+test("invalid page containers and pagination boundaries still reject instead of becoming empty history", () => {
+  for (const data of [null, undefined, {}, [], { messages: "invalid" }]) assert.throws(() => messagePage(data), /格式不正确/);
+  const valid = { returned: 0, limit: 1, offset: 0, order: "latest" };
+  for (const invalid of [{ returned: -1 }, { returned: 0.5 }, { returned: "0" }, { limit: 0 }, { limit: null }, { offset: -1 }, { offset: 0.5 }, { order: "oldest" }]) {
+    assert.throws(() => messagePage({ messages: [], pagination: { ...valid, ...invalid } }), /格式不正确/);
+  }
+});
+
+test("more than ten thousand empty raw rows survive overlapping page merges without producing bubbles", () => {
+  const rows = parseHistory(Array.from({ length: 10001 }, (_, id) => ({ id, role: "assistant", content: "" })));
+  const merged = mergeHistory(rows.slice(5000), rows.slice(0, 5001), true);
+  assert.equal(merged.length, 10001);
+  assert.deepEqual(merged.map(({ id }) => id), Array.from({ length: 10001 }, (_, id) => String(id)));
+  assert.deepEqual(historyForDisplay(merged), []);
+});
+
+test("reconciliation matches normalized user text, never a raw content fallback", () => {
+  const turn = { text: "原始问题", answer: "答案", delivery: "sent", status: "complete", baseIds: [] };
+  for (const display_content of ["公开问题", null, ""]) {
+    const history = parseHistory([
+      { id: "u", role: "user", content: "原始问题", display_content },
+      { id: "a", role: "assistant", content: "答案" },
+    ]);
+    assert.equal(reconcileTurns([turn], history)[0], turn);
+  }
+  const canonical = [historyMessage("u", "user", "公开问题", { content: "原始问题" }), historyMessage("a", "assistant", "答案")];
+  assert.equal(reconcileTurns([turn], canonical)[0], turn, "ignore legacy content even if supplied by an older cache");
+  const result = reconcileTurns([{ ...turn, text: "公开问题" }], canonical)[0];
+  assert.equal(result.remoteUserId, "u");
+  assert.equal(result.hideAnswer, true);
+});
+
+for (const [label, reply] of [
+  ["legacy raw content", historyMessage("a", "assistant", "其他正文", { content: "答案" })],
+  ["notices", historyMessage("a", "assistant", "", { notices: ["答案"] })],
+  ["hidden text", historyMessage("a", "assistant", "答案", { hidden: true })],
+  ["tool result text", historyMessage("a", "tool", "答案", { toolCallId: "result", toolName: "search" })],
+]) {
+  test(`reconciliation cannot use ${label} as a persisted assistant answer`, () => {
+    const turn = { text: "问题", answer: "答案", delivery: "unknown", status: "unknown", baseIds: [] };
+    const result = reconcileTurns([turn], [historyMessage("u", "user", "问题"), reply])[0];
+    assert.equal(result.remoteUserId, "u");
+    assert.equal(result.hideUser, true);
+    assert.equal(result.hideAnswer, false);
+    assert.equal(result.answer, "答案");
+  });
+}
+
+test("reasoning and media notices cannot hide local answers, while sidecar final text can", () => {
+  for (const [content, answer] of [
+    [[{ type: "reasoning", text: "答案" }], "答案"],
+    [[{ type: "thinking", thinking: "PRIVATE_THOUGHT" }], "仅含思考记录"],
+    [[{ type: "image_url", image_url: { url: "https://media.invalid/PRIVATE_IMAGE" } }], "图片内容（暂不预览）"],
+  ]) {
+    const history = parseHistory([{ id: "u", role: "user", content: "问题" }, { id: "a", role: "assistant", content }]);
+    const turn = { text: "问题", answer, delivery: "sent", status: "complete", baseIds: [] };
+    assert.equal(reconcileTurns([turn], history)[0].hideAnswer, false);
+  }
+  const history = parseHistory([
+    { id: "u", role: "user", content: { message: "问题" } },
+    { id: "a", role: "assistant", content: "", codex_message_items: [finalItem("答案完整文本")] },
+  ]);
+  const turn = { text: "问题", answer: "答案", delivery: "unknown", status: "unknown", baseIds: [] };
+  assert.equal(reconcileTurns([turn], history)[0].hideAnswer, true);
+});
+
+test("raw empty and hidden IDs anchor baseIds across overlapping pages and exclude old identical prompts", () => {
+  const base = parseHistory([
+    { id: "old-u", role: "user", content: "重复" },
+    { id: "old-a", role: "assistant", content: "回答" },
+    { id: "hidden", role: "tool", hidden: true },
+    { id: "empty", role: "assistant", content: "" },
+  ]);
+  const turn = { text: "重复", answer: "回答", delivery: "unknown", status: "unknown", baseIds: base.map(({ id }) => id) };
+  assert.deepEqual(turn.baseIds, ["old-u", "old-a", "hidden", "empty"]);
+  assert.equal(reconcileTurns([turn], base)[0], turn);
+  const incoming = parseHistory([
+    { id: "empty", role: "assistant", content: "" },
+    { id: "new-u", role: "user", content: { text: "重复" } },
+    { id: "new-a", role: "assistant", content: [{ type: "output_text", text: "回答" }] },
+  ]);
+  const result = reconcileTurns([turn], mergeHistory(base, incoming))[0];
+  assert.equal(result.remoteUserId, "new-u");
+  assert.equal(result.hideAnswer, true);
+  assert.equal(reconcileTurns([turn], incoming.slice(1))[0], turn, "a missing raw boundary is not permission to guess");
+});
+
+test("reconciliation stops at the next raw user row even if that row has no visible bubble", () => {
+  for (const boundary of [{ content: "" }, { content: "PRIVATE_HIDDEN_USER", hidden: true }]) {
+    const history = parseHistory([
+      { id: "u1", role: "user", content: "第一问" },
+      { id: "u2", role: "user", ...boundary },
+      { id: "a2", role: "assistant", content: "第二问的回答" },
+    ]);
+    const turn = { text: "第一问", answer: "第二问的回答", delivery: "sent", status: "complete", baseIds: [] };
+    const result = reconcileTurns([turn], history)[0];
+    assert.equal(result.remoteUserId, "u1");
+    assert.equal(result.hideAnswer, false);
+  }
+});
+
+test("historyToolIds deduplicate only non-hidden tool IDs in the matched user segment, never by name", () => {
+  const turn = {
+    text: "问题", answer: "部分答案", delivery: "unknown", status: "unknown", baseIds: [],
+    tools: ["matched", "pending", "orphan", "7", "hidden", "foreign", "unmatched"].map((id) => ({ id, name: "search", state: "ended" })),
+  };
+  const history = parseHistory([
+    { id: "u", role: "user", content: "问题" },
+    { id: "calls", role: "assistant", tool_calls: [call("matched"), call("pending"), call(7), call(undefined)] },
+    { id: "result", role: "tool", tool_call_id: "matched", name: "search", content: "部分答案" },
+    { id: "result-repeat", role: "tool", tool_call_id: "matched", name: "search" },
+    { id: "orphan", role: "tool", tool_call_id: "orphan", name: "search" },
+    { id: "no-id", role: "tool", name: "search" },
+    { id: "hidden-call", role: "assistant", hidden: true, tool_calls: [call("hidden")] },
+    { id: "hidden-result", role: "tool", hidden: true, tool_call_id: "hidden", name: "search" },
+    { id: "other-u", role: "user", content: "另一问" },
+    { id: "foreign", role: "assistant", tool_calls: [call("foreign")] },
+  ]);
+  const before = structuredClone({ turn, history });
+  freezeHistory(history);
+  const result = reconcileTurns([turn], history)[0];
+  assert.equal(result.remoteUserId, "u");
+  assert.equal(result.hideAnswer, false, "a matching raw tool result is not assistant prose");
+  assert.deepEqual([...result.historyToolIds].sort(), ["7", "matched", "orphan", "pending"]);
+  const suppressedIds = new Set(result.historyToolIds);
+  assert.deepEqual(result.tools.filter(({ id }) => !suppressedIds.has(id)).map(({ id }) => id), ["hidden", "foreign", "unmatched"]);
+  assert.deepEqual({ turn, history }, before);
+  assert.deepEqual(reconcileTurns([result], history)[0], result);
+});
+
+test("a non-matching or unsent local turn never loses same-named tools to unrelated history", () => {
+  const history = parseHistory([
+    { id: "u", role: "user", content: "其他问题" },
+    { id: "call", role: "assistant", tool_calls: [call("same-id")] },
+  ]);
+  for (const delivery of ["sent", "unknown", "unsent"]) {
+    const turn = { text: "本地问题", answer: "本地回答", delivery, status: "unknown", baseIds: [], tools: [{ id: "same-id", name: "search", state: "ended" }] };
+    assert.equal(reconcileTurns([turn], history)[0], turn);
+  }
+});
+
+test("unknown and malformed Codex phases cannot become persisted answers", () => {
+  for (const phase of ["draft", "", ["analysis"], ["final"], 0, {}, true]) {
+    for (const encode of [(items) => items, JSON.stringify]) {
+      const history = parseHistory([
+        { id: "u", role: "user", content: "问题" },
+        { id: "a", role: "assistant", content: "", codex_message_items: encode([finalItem("PRIVATE_DRAFT", { phase })]) },
+      ]);
+      assert.equal(history[1].text, "");
+      assert.deepEqual(history[1].notices, ["暂不支持的内容"]);
+      assert.doesNotMatch(JSON.stringify(historyForDisplay(history)), /PRIVATE_DRAFT/);
+      const turn = { text: "问题", answer: "PRIVATE_DRAFT", delivery: "sent", status: "complete", baseIds: [] };
+      assert.equal(reconcileTurns([turn], history)[0].hideAnswer, false);
+    }
+  }
+  for (const phase of [undefined, null, "final", "final_answer"]) {
+    const [row] = parseHistory([{ id: "a", role: "assistant", content: "", codex_message_items: [finalItem("正式答案", { phase })] }]);
+    assert.equal(row.text, "正式答案");
+    assert.deepEqual(row.notices, []);
+  }
+});
+
+test("orphan results deduplicate by ID within raw user boundaries, never by name", () => {
+  for (const boundary of [{ content: "下一问" }, { content: "" }, { content: "PRIVATE_HIDDEN", hidden: true }]) {
+    const rows = parseHistory([
+      { id: "hidden", role: "tool", tool_call_id: "same", hidden: true },
+      { id: "r1", role: "tool", tool_call_id: "same", name: "search" },
+      { id: "r2", role: "tool", tool_call_id: "same", name: "search" },
+      { id: "no-id-1", role: "tool", name: "search" },
+      { id: "no-id-2", role: "tool", name: "search" },
+      { id: "u", role: "user", ...boundary },
+      { id: "r3", role: "tool", tool_call_id: "same", name: "search" },
+      { id: "r4", role: "tool", tool_call_id: "same", name: "search" },
+    ]);
+    const snapshot = structuredClone(rows);
+    freezeHistory(rows);
+    const tools = displayTools(historyForDisplay(rows));
+    assert.deepEqual(tools.map(({ id }) => id), ["same", null, null, "same"]);
+    assert.ok(tools.every(({ hasResult, orphan }) => hasResult && orphan));
+    assert.equal(new Set(tools.map(({ key }) => key)).size, 4);
+    assert.deepEqual(rows, snapshot);
+  }
+});
+
+test("discarded history windows clear stale tool suppression without erasing confirmed text state", () => {
+  const turn = { text: "问题", answer: "答案", delivery: "sent", status: "complete", baseIds: [], tools: [{ id: "c", name: "search", state: "ended" }] };
+  const history = parseHistory([
+    { id: "u", role: "user", content: "问题" },
+    { id: "c", role: "assistant", tool_calls: [call("c")] },
+    { id: "a", role: "assistant", content: "答案" },
+  ]);
+  const matched = reconcileTurns([turn], history)[0];
+  assert.deepEqual(matched.historyToolIds, ["c"]);
+  const latest = mergeHistory(history, parseHistory([
+    { id: "u2", role: "user", content: "其他问题" },
+    { id: "a2", role: "assistant", content: "其他答案" },
+  ]));
+  for (const stale of [matched, { ...matched, remoteUserId: undefined, baseIds: ["missing"] }, { ...matched, delivery: "unsent" }]) {
+    const result = reconcileTurns([stale], latest)[0];
+    assert.deepEqual(result.historyToolIds, []);
+    assert.equal(result.hideUser, stale.hideUser);
+    assert.equal(result.hideAnswer, stale.hideAnswer);
+    assert.equal(result.tools, stale.tools);
+    assert.deepEqual(stale.historyToolIds, ["c"]);
+    assert.equal(reconcileTurns([result], latest)[0], result);
+  }
+  assert.deepEqual(reconcileTurns([matched], history.slice(0, 1))[0].historyToolIds, []);
 });
