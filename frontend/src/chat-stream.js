@@ -116,10 +116,73 @@ export function applyTurnEvent(turn, event, payload) {
   return turn;
 }
 
-export function textContent(value) {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map((part) => typeof part === "string" ? part : part?.text || "").join("");
-  return "";
+const unsupportedContent = "暂不支持的内容";
+const reasoningOnly = "仅含思考记录";
+
+function parseContent(value, depth = 0) {
+  if (value == null) return { text: "", notices: [] };
+  if (typeof value === "string") return { text: value, notices: [] };
+  if (depth > 16) return { text: "", notices: [unsupportedContent] };
+  if (Array.isArray(value)) {
+    const parts = value.map((part) => parseContent(part, depth + 1));
+    return { text: parts.map((part) => part.text).join(""), notices: [...new Set(parts.flatMap((part) => part.notices))] };
+  }
+  if (typeof value === "object") {
+    const type = value.type;
+    if (["image", "image_url", "input_image"].includes(type)) return { text: "", notices: ["图片内容（暂不预览）"] };
+    if (["audio", "input_audio", "output_audio"].includes(type)) return { text: "", notices: ["音频内容（暂不播放）"] };
+    if (["file", "document", "input_file"].includes(type)) return { text: "", notices: ["文件内容（暂不预览）"] };
+    if (["thinking", "reasoning", "redacted_thinking"].includes(type)) return { text: "", notices: [reasoningOnly] };
+    if (type != null && !["text", "input_text", "output_text"].includes(type)) return { text: "", notices: [unsupportedContent] };
+    const field = ["text", "output_text", "content", "message"].find((key) => value[key] != null);
+    if (field) return parseContent(value[field], depth + 1);
+    if (["text", "output_text", "content", "message"].some((key) => Object.hasOwn(value, key))) return { text: "", notices: [] };
+  }
+  return { text: "", notices: [unsupportedContent] };
+}
+
+function codexContent(value) {
+  if (value == null || value === "") return { text: "", notices: [] };
+  let items = value;
+  if (typeof items === "string") {
+    try { items = JSON.parse(items); }
+    catch { return { text: "", notices: [unsupportedContent] }; }
+  }
+  if (!Array.isArray(items)) return { text: "", notices: [unsupportedContent] };
+  let text = "";
+  const notices = new Set();
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      notices.add(unsupportedContent);
+      continue;
+    }
+    if (item.type === "reasoning") {
+      notices.add(reasoningOnly);
+      continue;
+    }
+    if (item.type !== "message" || item.role !== "assistant") continue;
+    if (["analysis", "commentary"].includes(item.phase)) {
+      notices.add(reasoningOnly);
+      continue;
+    }
+    if ((item.phase != null && !["final", "final_answer"].includes(item.phase)) || !Array.isArray(item.content)) {
+      notices.add(unsupportedContent);
+      continue;
+    }
+    for (const part of item.content) {
+      if (["text", "output_text"].includes(part?.type) && typeof part.text === "string") text += part.text;
+      else notices.add(unsupportedContent);
+    }
+  }
+  return { text, notices: [...notices] };
+}
+
+function storedId(value) {
+  return (typeof value === "string" && value.trim()) || (typeof value === "number" && Number.isFinite(value)) ? String(value) : null;
+}
+
+function toolName(value) {
+  return typeof value === "string" && value.trim() ? value : "工具";
 }
 
 export function errorText(value, fallback = "请求失败") {
@@ -137,21 +200,77 @@ export function messagePage(data) {
     || !Number.isInteger(page.limit) || page.limit < 1) {
     throw new Error("历史消息响应格式不正确，请重试。");
   }
-  const messages = data.messages
-    .filter((message) => ["user", "assistant"].includes(message.role)
-      && !message.hidden && !["hidden", "system", "tool"].includes(message.display_kind))
-    .map((message) => ({
-      id: String(message.id),
-      role: message.role,
-      text: textContent(message.display_content ?? message.content),
-      content: textContent(message.content),
-    }));
+  const messages = data.messages.map((message) => {
+    if (!message || storedId(message.id) === null || typeof message.role !== "string") {
+      throw new Error("历史消息条目格式不正确，请重试。");
+    }
+    const id = String(message.id);
+    const hidden = Boolean(message.hidden) || ["hidden", "system", "tool"].includes(message.display_kind)
+      || !["user", "assistant", "tool"].includes(message.role);
+    const projected = Object.hasOwn(message, "display_content");
+    const tools = !hidden && message.role === "assistant" && Array.isArray(message.tool_calls)
+      ? message.tool_calls.map((call, index) => ({
+        key: `${id}:call:${index}`, id: storedId(call?.id ?? call?.tool_call_id), name: toolName(call?.function?.name ?? call?.name),
+      })) : [];
+    let body = hidden || message.role === "tool" ? { text: "", notices: [] }
+      : parseContent(projected ? message.display_content : message.content);
+    if (!hidden && !projected && message.role === "assistant" && !body.text.trim() && !body.notices.length) {
+      body = codexContent(message.codex_message_items);
+    }
+    const hasReasoning = [message.reasoning, message.reasoning_content, message.reasoning_details]
+      .some((value) => typeof value === "string" && value.trim());
+    let notices = body.notices.filter((notice) => notice !== reasoningOnly || (!body.text.trim() && !tools.length));
+    if (!hidden && !projected && message.role === "assistant" && hasReasoning && !body.text.trim() && !tools.length && !notices.length) {
+      notices = [reasoningOnly];
+    }
+    return {
+      id, role: message.role, text: body.text, notices, hidden, tools,
+      toolCallId: !hidden && message.role === "tool" ? storedId(message.tool_call_id) : null,
+      toolName: !hidden && message.role === "tool" ? toolName(message.tool_name ?? message.name) : "",
+    };
+  });
   return {
     messages,
-    // Never use the filtered length for a backend offset.
+    // Hidden and empty rows still count toward paging and submission boundaries.
     offset: page.offset + page.returned,
     hasMore: page.returned >= page.limit,
   };
+}
+
+export function historyForDisplay(history) {
+  const messages = [];
+  const calls = new Map();
+  const orphanIds = new Set();
+  for (const message of history) {
+    if (message.role === "user") {
+      calls.clear();
+      orphanIds.clear();
+    }
+    if (message.hidden) continue;
+    if (message.role === "tool") {
+      const call = message.toolCallId && calls.get(message.toolCallId);
+      if (call) call.hasResult = true;
+      else if (!orphanIds.has(message.toolCallId)) {
+        messages.push({
+          ...message, role: "assistant", tools: [{
+            key: `${message.id}:result`, id: message.toolCallId, name: message.toolName,
+            hasResult: true, orphan: true,
+          }],
+        });
+        if (message.toolCallId) orphanIds.add(message.toolCallId);
+      }
+      continue;
+    }
+    const tools = [];
+    for (const call of message.tools) {
+      if (call.id && calls.has(call.id)) continue;
+      const tool = { ...call, hasResult: false, orphan: false };
+      tools.push(tool);
+      if (call.id) calls.set(call.id, tool);
+    }
+    messages.push({ ...message, tools });
+  }
+  return messages.filter((message) => message.text.trim() || message.notices.length || message.tools.length);
 }
 
 export function mergeHistory(existing, incoming, older = false) {
@@ -176,24 +295,32 @@ export function mergeHistory(existing, incoming, older = false) {
 export function reconcileTurns(turns, history) {
   let after = -1;
   return turns.map((turn) => {
-    if (turn.delivery === "unsent") return turn;
+    const unmatched = turn.historyToolIds?.length ? { ...turn, historyToolIds: [] } : turn;
+    if (turn.delivery === "unsent") return unmatched;
     const boundary = turn.baseIds.at(-1);
     const boundaryIndex = boundary == null ? -1 : history.findIndex((message) => message.id === boundary);
-    if (!turn.remoteUserId && boundary != null && boundaryIndex < 0) return turn;
-    const index = history.findIndex((message, position) => position > Math.max(after, boundaryIndex) && message.role === "user"
+    if (!turn.remoteUserId && boundary != null && boundaryIndex < 0) return unmatched;
+    const index = history.findIndex((message, position) => position > Math.max(after, boundaryIndex)
+      && message.role === "user" && !message.hidden && message.text.trim()
       && (turn.remoteUserId ? message.id === turn.remoteUserId
-        : !turn.baseIds.includes(message.id) && (message.content === turn.text || message.text === turn.text)));
-    if (index < 0) return turn;
+        : !turn.baseIds.includes(message.id) && message.text === turn.text));
+    if (index < 0) return unmatched;
     after = index;
     const replies = [];
-    for (let i = index + 1; i < history.length && history[i].role !== "user"; i += 1) replies.push(history[i]);
-    const replyFound = replies.some((message) => message.role === "assistant"
-      && (!turn.answer || [message.text, message.content].some((text) => text && text.startsWith(turn.answer.trimEnd()))));
+    for (let i = index + 1; i < history.length && history[i].role !== "user"; i += 1) {
+      if (!history[i].hidden) replies.push(history[i]);
+    }
+    const answer = turn.answer.trimEnd();
+    const replyFound = replies.some((message) => message.role === "assistant" && message.text.trim()
+      && (!answer || (turn.status === "complete" ? message.text.trimEnd() === answer : message.text.startsWith(answer))));
+    const historyToolIds = [...new Set(replies.flatMap((message) => message.role === "tool"
+      ? [message.toolCallId] : (message.tools || []).map((tool) => tool.id)).filter(Boolean))];
     return {
       ...turn,
       remoteUserId: history[index].id,
       hideUser: true,
-      hideAnswer: turn.hideAnswer || replyFound || (!turn.answer && turn.status === "complete"),
+      hideAnswer: Boolean(replyFound || (!turn.answer && turn.status === "complete")),
+      historyToolIds,
     };
   });
 }

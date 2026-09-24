@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { applyTurnEvent, errorText, mergeHistory, messagePage, readChatStream, reconcileTurns } from "./chat-stream.js";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { applyTurnEvent, errorText, historyForDisplay, mergeHistory, messagePage, readChatStream, reconcileTurns } from "./chat-stream.js";
 
 const SELECTION_KEY = "hermes.chat.selection";
 let nextKey = 0;
@@ -68,6 +68,7 @@ export default function Chat({ active = true }) {
   const stickToBottom = useRef(true);
   const prependScroll = useRef(null);
   const current = store.conversations[store.selected];
+  const displayHistory = useMemo(() => historyForDisplay(current.history), [current.history]);
 
   const change = useCallback((key, transform) => {
     if (!mounted.current) return;
@@ -466,16 +467,28 @@ export default function Chat({ active = true }) {
           {current.historyLoading && <p className="hint" role="status">{current.moreLoading ? "正在加载更早消息…" : "正在读取历史消息…"}</p>}
           {current.historyLoaded && !current.hasMore && <p className="hint">已读取 dashboard 当前会话段；压缩前的历史可能不在此接口返回范围内。</p>}
           {current.historyError && <div className="chat-feedback" role="alert"><p className="error">历史消息读取失败：{current.historyError}</p><button type="button" disabled={current.historyLoading || current.sending} onClick={retryHistory}>重试历史</button></div>}
-          {!current.historyLoading && !current.historyError && !current.history.length && !current.turns.length
+          {!current.historyLoading && !current.historyError && !displayHistory.length && !current.turns.length
             && (!current.storedId || current.historyLoaded) && <div className="state-block">
               <p>{current.status === "running" ? "等待正在进行的任务完成" : current.storedId ? "暂无可显示的消息" : "开始一段新对话"}</p>
-              <p className="hint">{current.storedId ? "系统与工具内部消息不在这里显示。" : "输入消息后才会创建会话。"}</p>
+              <p className="hint">{current.storedId ? "系统与隐藏消息不展示，工具仅展示摘要。" : "输入消息后才会创建会话。"}</p>
             </div>}
-          {current.history.map((message) => <div key={message.id} className={`msg ${message.role}`}>
-            <div className="bubble"><span className="chat-sr-only">{message.role === "user" ? "你：" : "助手："}</span>{message.text}</div>
+          {displayHistory.map((message) => <div key={message.id} className="history-message chat-turn">
+            {(message.text.trim() || message.notices.length > 0) && <div className={`msg ${message.role}`}>
+              <div className="bubble">
+                <span className="chat-sr-only">{message.role === "user" ? "你：" : "助手："}</span>
+                {message.text}
+                {message.notices.map((notice) => <span className="content-notice" key={notice}>{notice}</span>)}
+              </div>
+            </div>}
+            {message.tools.map((tool) => <div className="tool-row" key={tool.key}>
+              <span className="dot" aria-hidden="true" />{tool.name}
+              <span>{tool.hasResult ? "已有结果" : "未找到结果"}</span>
+              {tool.orphan && <span>调用记录未加载或未找到</span>}
+            </div>)}
           </div>)}
           {current.turns.map((turn) => {
-            if (turn.hideUser && turn.hideAnswer) return null;
+            const tools = turn.tools.filter((tool) => !turn.historyToolIds?.includes(tool.id));
+            if (turn.hideUser && turn.hideAnswer && !tools.length) return null;
             return <div key={turn.id} className="chat-turn">
               {!turn.hideUser && <div className="msg user"><div className="bubble">
                 <span className="chat-sr-only">你：</span>{turn.text}
@@ -486,7 +499,7 @@ export default function Chat({ active = true }) {
                 {turn.status !== "pending" && turn.status !== "complete" && <span className="message-delivery">{turn.status === "interrupted" ? "生成中断" : turn.status === "error" ? "生成失败" : "连接中断 · 状态未知"} · 已保留内容</span>}
               </div></div>}
               {turn.status === "pending" && !turn.answer && <p className="hint" role="status">等待回复…</p>}
-              {turn.tools.map((tool) => <div className="tool-row" key={tool.id}><span className={`dot ${tool.state === "complete" ? "ok" : tool.state === "running" ? "run" : ""}`} aria-hidden="true" />{tool.name}<span>{toolLabels[tool.state]}</span></div>)}
+              {tools.map((tool) => <div className="tool-row" key={tool.id}><span className={`dot ${tool.state === "complete" ? "ok" : tool.state === "running" ? "run" : ""}`} aria-hidden="true" />{tool.name}<span>{toolLabels[tool.state]}</span></div>)}
               {["unsent", "unknown"].includes(turn.delivery) && <div className="chat-turn-retry">
                 <span className="hint">{turn.delivery === "unsent" ? "本条未发送，可恢复输入后手动重试。" : "请先核对历史，重试可能重复提交。"}</span>
                 <button type="button" disabled={current.sending} onClick={() => restoreInput(turn.text)}>恢复输入</button>
