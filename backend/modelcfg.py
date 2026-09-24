@@ -126,6 +126,19 @@ def list_model_configs(refresh: bool = False):
     for r in hidden_store.list_manual():
         manual_by_vendor.setdefault(r["vendor"], []).append(r)
 
+    # 兜底（只执行一次，不在循环内）：当前默认模型不在 SQLite → 补存一份（含默认标记），保证列表第一条可见
+    default_entry = hidden_store.get_default()
+    if cur_provider and cur_model and (
+            default_entry is None or default_entry.get("model") != cur_model
+            or default_entry.get("vendor") != cur_provider):
+        vend = next((ve for ve, _s, _k in _all_vendor_entries(doc)
+                     if _slug_for(str(ve.get("name") or "")) == cur_provider), None)
+        if vend is not None:
+            meta = (vend.get("models") or {}).get(cur_model, {}) if isinstance(vend.get("models"), dict) else {}
+            hidden_store.set_default(cur_provider, cur_model,
+                                     None, meta.get("context_length"), meta.get("reasoning_effort"))
+            default_entry = hidden_store.get_default()
+
     configs = []
     for e, section, key in _all_vendor_entries(doc):
         name = str(e.get("name") or "")
@@ -164,19 +177,6 @@ def list_model_configs(refresh: bool = False):
                 "context_length": man.get("context_length"),
                 "reasoning_effort": man.get("reasoning_effort"),
             })
-
-        # 兜底：当前默认模型不在 SQLite → 补存一份（含默认标记），保证列表第一条可见
-        default_entry = hidden_store.get_default()
-        if cur_provider and cur_model and (
-                default_entry is None or default_entry.get("model") != cur_model
-                or default_entry.get("vendor") != slug):
-            vend = next((ve for ve, _s, _k in _all_vendor_entries(doc)
-                         if _slug_for(str(ve.get("name") or "")) == cur_provider), None)
-            if vend is not None:
-                meta = (vend.get("models") or {}).get(cur_model, {}) if isinstance(vend.get("models"), dict) else {}
-                hidden_store.set_default(cur_provider, cur_model,
-                                         None, meta.get("context_length"), meta.get("reasoning_effort"))
-                default_entry = hidden_store.get_default()
 
         is_current = (cur_provider == slug) or                      (cur_provider.lower() == "custom" and bool(cur_base) and cur_base == base_url.rstrip("/"))
         # 默认模型不在 entry.models 清单里（model 段直接指定）→ 补入条目
