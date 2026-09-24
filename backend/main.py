@@ -15,18 +15,33 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
+from urllib.parse import quote
+
+import requests
 
 # 保证从任何 cwd / --reload 子进程都能找到同目录模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from config import APP_PASS, APP_TOKEN, APP_USER, hc, require_app_token
+from chat import ChatError, ChatManager
 
-app = FastAPI(title="Hermes Config Backend")
+
+@asynccontextmanager
+async def lifespan(app):
+    app.state.chat_manager = ChatManager(hc)
+    try:
+        yield
+    finally:
+        await app.state.chat_manager.close()
+
+
+app = FastAPI(title="Hermes Config Backend", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],   # 只放行前端 dev server
@@ -53,65 +68,84 @@ def login(body: LoginBody):
     return {"token": APP_TOKEN, "next": "/"}
 
 
-# ── 对话（只连 dashboard 的 /api/ws JSON-RPC 桥，经 ws-ticket）──────────
 class ChatBody(BaseModel):
-    text: str
+    text: str = Field(min_length=1, max_length=100000)
+    stored_session_id: str | None = Field(default=None, min_length=1, max_length=256,
+                                          pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    profile: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @field_validator("text")
+    @classmethod
+    def nonblank_text(cls, value):
+        if not value.strip():
+            raise ValueError("消息不能为空")
+        return value.strip()
 
 
 @app.post("/api/chat", dependencies=[Depends(require_app_token)])
-async def chat(body: ChatBody):
-    """把一条用户消息交给 Hermes，返回 SSE 事件流（message.delta 等）。"""
-    from chat import stream_turn
-
-    await asyncio.to_thread(hc.ensure_logged_in)   # WS 流程开始前必须已登录（否则 ws-ticket 拿不到）；同步 requests 调用放到线程池，避免阻塞 event loop
-
-    queue: asyncio.Queue = asyncio.Queue()
-
-    async def on_event(name: str, params: dict) -> None:
-        # 只把前端可能要渲染的事件透传；内部 RPC 帧可在此过滤
-        if name.startswith(("message.", "tool.", "session.", "run.", "error", "gateway.", "reasoning.")):
-            await queue.put((name, params))
-
-    task = asyncio.create_task(
-        stream_turn(hc.s, text=body.text, on_event=on_event)
-    )
+async def chat(body: ChatBody, request: Request):
+    try:
+        session, queue = await request.app.state.chat_manager.start_turn(
+            body.text, body.stored_session_id, body.profile)
+    except ChatError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except (requests.RequestException, OSError, asyncio.TimeoutError) as exc:
+        raise HTTPException(502, "无法连接 dashboard，请稍后重试") from exc
 
     async def generate():
         try:
-            sent_terminal = False
             while True:
                 try:
-                    name, params = await asyncio.wait_for(queue.get(), timeout=30)
+                    name, envelope = await asyncio.wait_for(queue.get(), timeout=15)
                 except asyncio.TimeoutError:
-                    if task.done():
-                        break
+                    yield ": keep-alive\n\n"
                     continue
-                payload = json.dumps(params, ensure_ascii=False)
-                yield f"event: {name}\ndata: {payload}\n\n"
-                if name in ("message.complete", "run.completed", "run.failed",
-                            "session.error", "message.error"):
-                    sent_terminal = True
+                yield f"event: {name}\ndata: {json.dumps(envelope, ensure_ascii=False)}\n\n"
+                if name in ("message.complete", "chat.error"):
                     break
-            if not task.done():
-                # 终态已发出但任务还在收尾：等它一小会儿
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=15)
-                except Exception:
-                    pass
-            else:
-                # 任务已结束：把异常作为 SSE 错误事件吐出（避免静默空响应）
-                exc = task.exception()
-                if exc is not None:
-                    msg = json.dumps({"message": str(exc)}, ensure_ascii=False)
-                    yield f"event: error\ndata: {msg}\n\n"
-                elif not sent_terminal:
-                    yield "event: error\ndata: {\"message\":\"对话结束但未收到终态事件\"}\n\n"
         finally:
-            if not task.done():
-                task.cancel()
+            # A browser disconnect only detaches its subscriber; it does not stop the upstream turn.
+            session.subscribers.discard(queue)
 
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _history_get(path, params):
+    try:
+        response = hc.request("GET", path, params=params)
+        if not response.ok:
+            status = response.status_code if response.status_code in (400, 404, 503) else 502
+            raise HTTPException(status, "历史会话不存在" if status == 404 else "读取 Hermes 历史失败，请稍后重试")
+        return response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise HTTPException(502, "无法读取 Hermes 历史，请稍后重试") from exc
+
+
+@app.get("/api/sessions", dependencies=[Depends(require_app_token)])
+def sessions(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0),
+             profile: str | None = Query(None, min_length=1, max_length=128)):
+    return _history_get("/api/sessions", {"limit": limit, "offset": offset, "profile": profile,
+                                         "order": "recent", "archived": "exclude", "min_messages": 1})
+
+
+@app.get("/api/sessions/{session_id}/messages", dependencies=[Depends(require_app_token)])
+def session_messages(session_id: str = Path(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+                     limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
+                     profile: str | None = Query(None, min_length=1, max_length=128)):
+    return _history_get(f"/api/sessions/{quote(session_id, safe='')}/messages", {
+        "limit": limit, "offset": offset, "order": "latest", "profile": profile, "include_compacted": True,
+    })
+
+
+@app.get("/api/sessions/{session_id}/state", dependencies=[Depends(require_app_token)])
+async def session_state(request: Request,
+                        session_id: str = Path(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+                        profile: str | None = Query(None, min_length=1, max_length=128)):
+    try:
+        return await request.app.state.chat_manager.state(session_id, profile)
+    except (ChatError, OSError, asyncio.TimeoutError) as exc:
+        raise HTTPException(502, "暂时无法确认生成状态，请刷新历史；不会自动重发") from exc
 
 
 def _guard(resp):
