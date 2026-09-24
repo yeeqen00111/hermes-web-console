@@ -63,7 +63,7 @@ async def chat(body: ChatBody):
     """把一条用户消息交给 Hermes，返回 SSE 事件流（message.delta 等）。"""
     from chat import stream_turn
 
-    hc.ensure_logged_in()   # WS 流程开始前必须已登录（否则 ws-ticket 拿不到）
+    await asyncio.to_thread(hc.ensure_logged_in)   # WS 流程开始前必须已登录（否则 ws-ticket 拿不到）；同步 requests 调用放到线程池，避免阻塞 event loop
 
     queue: asyncio.Queue = asyncio.Queue()
 
