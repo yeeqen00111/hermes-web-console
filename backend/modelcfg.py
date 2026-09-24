@@ -254,6 +254,22 @@ def upsert_model_config(body: ModelConfigBody):
             r = hc.request("DELETE", "/api/env", json={"key": key_var}, timeout=30)
             target.pop("key_env", None)
             target.pop("api_key", None)
+    elif not is_new:
+        # 编辑但没动 api_key：若厂商被改名，把旧 key_env 变量迁移到新变量名，
+        # 否则 entry.key_env 仍指向旧变量、新名算出来的变量名从未创建（.env 孤儿）。
+        old_key_env = target.get("key_env")
+        if old_key_env and old_key_env != key_var:
+            get = hc.request("GET", "/api/env", json={"key": old_key_env})
+            old_val = ""
+            try:
+                old_val = str(get.json().get("value") or get.json().get(old_key_env) or "")
+            except Exception:
+                old_val = ""
+            if old_val:
+                r = hc.request("PUT", "/api/env", json={"key": key_var, "value": old_val})
+                if r.status_code < 400:
+                    hc.request("DELETE", "/api/env", json={"key": old_key_env}, timeout=30)
+                    target["key_env"] = key_var
 
     if body.make_default:
         model_cfg = doc.setdefault("model", {})
@@ -458,9 +474,21 @@ def rename_vendor_model(vendor_id: str, model_id: str, body: AddModelBody):
 
 @router.delete("/{vendor_id}/models/{model_id}", dependencies=[Depends(require_app_token)])
 def delete_vendor_model(vendor_id: str, model_id: str):
-    """删除一个模型条目（SQLite；同时清隐藏记录，列表立即消失）。"""
+    """删除一个模型条目（SQLite；同时清隐藏记录 + reasoning_overrides 旧键）。"""
     delete_custom(vendor_id, model_id)
     _unhide(vendor_id, model_id)
+    # 清掉 config.yaml 里指向已删模型的思考等级 override，避免同名模型意外继承
+    import yaml as _y
+    doc = _load_doc()
+    agent_cfg = doc.get("agent") or {}
+    ov = agent_cfg.get("reasoning_overrides")
+    if isinstance(ov, dict) and model_id in ov:
+        ov.pop(model_id, None)
+        agent_cfg["reasoning_overrides"] = ov
+        doc["agent"] = agent_cfg
+        _raw_ok(hc.request("PUT", "/api/config/raw",
+                           json={"yaml_text": _y.safe_dump(doc, allow_unicode=True, sort_keys=False)}),
+                "overrides-cleanup")
     return {"ok": True}
 
 
