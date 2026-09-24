@@ -349,23 +349,23 @@ sequenceDiagram
 
 ---
 
-## 8. 对话功能（/api/chat）完整链路
+## 7. 对话功能（/api/chat）完整链路
 
 > 对话是**双向长连接**：前端 SSE 进、后端把 dashboard 的 **WS JSON-RPC** 桥转成 SSE。来源：`Chat.jsx` / `main.py:/api/chat` / `chat.py:stream_turn`。
 
-### 8.1 参与方
+### 7.1 参与方
 - **前端 `Chat.jsx`**：输入框 → `POST /api/chat {text}` → 用 `fetch` + `ReadableStream` 读 SSE，`handleChunk` 解析 `event:`/`data:` 分流渲染。
 - **后端 `main.py:/api/chat`**：`ensure_logged_in()` 后起 `stream_turn` 协程；用 `asyncio.Queue` 把 WS 事件桥成 `text/event-stream`；只放行 `message./tool./session./run./error/gateway./reasoning.` 前缀事件。
 - **`chat.py`**：拿已登录 cookie → `POST /api/auth/ws-ticket` 换单次 ticket → `WS /api/ws?ticket=` → `session.create` → `prompt.submit` → 常驻 reader 循环分发事件。
 - **dashboard gateway**（经 9119 运行态）：真正跑 agent、流式吐 token、调用工具。
 
-### 8.2 关键约定（踩过坑）
+### 7.2 关键约定（踩过坑）
 - WS 事件帧是 `{"method":"event","params":{type, payload, session_id,…}}` —— **真实事件名在 `params.type`，payload 在 `params.payload`**（不是外层 method）。
 - server→client 请求（approval/clarify/sudo/secret/vault/connection/terminal.read/window.read 等带 string id）：**demo 一律回 `{"jsonrpc":..,"id":..,"result":{}}` 取消**，避免 agent 半路干等。
 - 终态事件：`message.complete / run.completed / run.failed / session.error / message.error`。
 - 前端 SSE chunk 按 `\n\n` 切分；`data:` 行 `JSON.parse`，`payload = params.payload ?? params`。
 
-### 8.3 对话端到端时序（Mermaid）
+### 7.3 对话端到端时序（Mermaid）
 ```mermaid
 sequenceDiagram
     participant U as 浏览器 Chat.jsx
@@ -398,7 +398,7 @@ sequenceDiagram
     B->>B: 关 WS / cancel reader
 ```
 
-### 8.4 前端事件分流（Chat.jsx handleChunk）
+### 7.4 前端事件分流（Chat.jsx handleChunk）
 | SSE 事件名 | 前端动作 | 取的字段 |
 |---|---|---|
 | `message.delta` | 追加到进行中气泡 `stream` | `payload.text` |
@@ -408,13 +408,13 @@ sequenceDiagram
 | `error` / `session.error` | 顶部错误提示 | `payload.message` |
 | 其它（reasoning.delta / session.title 等） | 当前忽略（已透传但前端未渲染） | — |
 
-### 8.5 辅助只读链路（前端/其它页用到）
+### 7.5 辅助只读链路（前端/其它页用到）
 | 前端 | 后端 | dashboard | 说明 |
 |---|---|---|---|
 | 健康检查/顶栏状态 | `GET /api/status` | `GET /api/status` | 透传 gateway/dashboard 综合状态 |
 | 模型下拉（待做） | `GET /api/model-configs`（§3.1） | `GET /api/config/raw` + SQLite | 当前默认模型 = `doc.model.provider/default` |
 
-### 8.6 对话链路已知点
+### 7.6 对话链路已知点
 - **模型由服务端默认决定**：前端 `POST /api/chat` 只发 `{text}`，不带模型；用哪个模型 = 上一节「设默认」的 `model.provider/default`（config 段）。这正是下一步「Chat 顶栏模型下拉」要补的口子。
 - **每个回合新建 `session.create`**：demo 暂不跨回合复用 session_id（无会话历史持久化）。
 - **SSE 30s 心跳/超时**：queue 读 30s 无事件且 task 未结束则 continue；终态即 break。
@@ -422,7 +422,7 @@ sequenceDiagram
 
 ---
 
-## 9. 已知行为 / 缺口（按当前代码如实记录）
+## 8. 已知行为 / 缺口（按当前代码如实记录）
 
 - **添加模型时填的「思考等级」不会运行时生效**：`add_vendor_model` 只写 SQLite，**不写 `agent.reasoning_overrides`**；只有**编辑（rename）路径**会写并生效。若希望「+模型 填思考等级即生效」，需在 add 路径补齐 overrides 写入。
 - **`activate` 端点存在但前端未调用**：当前「激活/设默认」统一走 `default?model=`（`model/set`）。
