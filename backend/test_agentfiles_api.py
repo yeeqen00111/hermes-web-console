@@ -73,6 +73,10 @@ class FakeHermes:
             self.files[kw["json"]["path"]] = kw["json"]["content"]
             return _resp({"ok": True})
         if path == "/api/ops/backup":
+            # 真端点 `body: BackupRequest` 是必填参数：**没有 body 就 422**（字段全可选 ≠ body 可省）。
+            # 假上游照抄这个契约，否则「没发 body」这类 bug 在离线测试里永远是绿的（2026-09-28 真机踩到）。
+            if "json" not in kw or kw["json"] is None:
+                return _resp({"detail": [{"msg": "Field required"}]}, 422)
             if self.backup_status >= 400:
                 return _resp({"detail": "nope"}, self.backup_status)
             return _resp({"ok": True, "archive": "/opt/data/backups/x.zip"})
@@ -261,6 +265,15 @@ class AgentFilesApiTests(unittest.TestCase):
         self.client.put("/api/agent-files/memory", json={"content": "b", "base_byteSize": 1})
         self.client.put("/api/agent-files/memory", json={"content": "c", "base_byteSize": 1})
         self.assertEqual(len(fake.backups()), 1)
+
+    def test_backup_carries_a_json_body(self):
+        # 真端点 body 必填（缺失即 422）→ 空对象也必须发出去
+        fake = self.upstream()
+        fake.files[f"{HOME}/memories/MEMORY.md"] = "a"
+        self.client.put("/api/agent-files/memory", json={"content": "b", "base_byteSize": 1})
+        call = fake.backups()[0]
+        self.assertIn("json", call[2])
+        self.assertEqual(call[2]["json"], {})
 
     def test_backup_failure_blocks_the_write(self):
         fake = self.upstream()

@@ -145,11 +145,15 @@ def _write_file(name: str, content: str) -> int:
 
 
 def _ensure_backup() -> None:
-    """本进程首次写前备份一次。备份是唯一的恢复源 → **失败即拒绝写入**。"""
+    """本进程首次写前备份一次。备份是唯一的恢复源 → **失败即拒绝写入**。
+
+    ⚠️ body 必须发（哪怕空对象）：`POST /api/ops/backup` 的 `body: BackupRequest` 是**必填参数**，
+    缺 body 会被 FastAPI 判 422（字段本身全可选，缺的是 body 本体）——2026-09-28 真机踩到。
+    """
     global _backup_done
     if _backup_done:
         return
-    resp = hc.request("POST", "/api/ops/backup")
+    resp = hc.request("POST", "/api/ops/backup", json={})
     if resp.status_code >= 400:
         raise HTTPException(status_code=502,
                             detail=f"写入前备份失败（HTTP {resp.status_code}），本次保存已取消")
