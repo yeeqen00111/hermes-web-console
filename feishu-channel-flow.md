@@ -12,20 +12,24 @@ flowchart LR
         L1["load()"]
         S1["save()"]
         T1["runTest()"]
+        R1["restartGateway()"]
     end
     subgraph 后端 [自研 FastAPI · 8000]
         L2["GET /api/channels/feishu"]
         S2["PUT /api/channels/feishu"]
         T2["POST /api/channels/feishu/test"]
+        R2["POST /api/channels/feishu/restart"]
     end
     subgraph Hermes [Hermes dashboard · 8426→9119]
         L3["GET /api/messaging/platforms"]
         S3["PUT /api/messaging/platforms/feishu"]
         T3["POST /api/messaging/platforms/feishu/test"]
+        R3["POST /api/gateway/restart"]
     end
     L1 --> L2 --> L3
     S1 --> S2 --> S3
     T1 --> T2 --> T3
+    R1 --> R2 --> R3
 ```
 
 三条链路全部**不带 `?profile=`**（unscoped）= 管「正在跑的那份网关」的配置。密钥明文**只在「浏览器→自研后端→Hermes 保存」这一瞬间存在**，上游只回 `is_set`/脱敏值，后端错误回显永远不含响应体。
@@ -71,10 +75,17 @@ flowchart TD
     G3 --> H
     H --> I["后端透传结果"]
     I --> J{"hot_served ?"}
-    J -- true --> K1["已保存 · 网关已热生效"]
-    J -- false --> K2["已保存 · 需在服务器执行<br/>docker restart hermes 生效"]
+    J -- true --> K1["已保存 · 网关热生效"]
+    J -- false --> K2["已保存<br/>提示：点「重启网关生效」或服务器 docker restart hermes"]
     K1 --> M["自动 load() 重拉<br/>刷新 is_set 与状态徽标"]
-    K2 --> M
+    K2 --> R["restartGateway()<br/>confirm 弹窗 → POST /api/channels/feishu/restart"]
+    R --> R2["后端转发 POST /api/gateway/restart"]
+    R2 --> R3["网关回落<br/>stopped → starting → running（实测约 15~40s）"]
+    R3 --> R4["前端轮询 GET 卡片<br/>直到 gateway_running && state = connected"]
+    R4 -- 超时 100s --> R5["提示：在服务器 docker restart hermes"]
+    R4 -- 恢复 --> R6["提示：网关已重启，飞书渠道已连接"]
+    R5 --> M
+    R6 --> M
 ```
 
 | 步骤 | 动作 | 数据 |
@@ -85,12 +96,14 @@ flowchart TD
 | 4 🔻 Hermes | 应用 | ① `clear_env` 每个键：`remove_env_value`（真清除）；② `env` 每个键：**空串被 `if trimmed:` 跳过 = 不改**，非空则 `save_env_value` 写入 `.env`；③ `enabled` 非空则写 `config.yaml` 的 `platforms.feishu.enabled` |
 | 5 🔻 Hermes | 返回 | `{ok:true, platform:"feishu", hot_served:false}`（单容器模式恒 false=未热生效） |
 | 6 ⚙️ 后端 | 返回 | 透传该结果；上游 ≥400→固定文案（400/409/404 保状态码，其余 502） |
-| 7 🔺 前端 | 提示 + 重拉 | `hot_served ? "已保存。" : "已保存。单容器模式下需在服务器执行 docker restart hermes 才会生效。"`；然后自动 `load()` 刷新 `is_set` 与状态徽标 |
+| 7 🔺 前端 | 提示 + 重拉 | `hot_served ? "已保存。" : "已保存。点「重启网关生效」加载新配置（或服务器 docker restart hermes）。"`；然后自动 `load()` 刷新 `is_set` 与状态徽标 |
 
 **三态语义（必须分清）**：
 - 字段没动 → 不发 → 保持原样
 - 字段输入（含空串）→ 进 `env` → 空串被上游跳过 = 不改；要清除只能走第③种
 - 字段点「✕ 清除」→ 进 `clear_env` → 上游 `remove_env_value` = 真删除
+
+**写入后生效**：单容器下 PUT 不热生效，需重启网关进程。优先「重启网关生效」按钮（`POST /api/channels/feishu/restart` → `POST /api/gateway/restart`，2026-09-28 真机验证有效：回落约 15~40s 自动回来，全部平台重连）；失败兜底服务器 `docker restart hermes`。
 
 ---
 
