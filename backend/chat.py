@@ -125,14 +125,18 @@ class ChatManager:
                             error = frame["error"]
                             code = error.get("code")
                             # 4001 = runtime session not in the gateway process
-                            # (reaped/evicted); surface it so callers can ask the
-                            # user to refresh instead of retrying. 4007/4008 are
-                            # not-found style codes. Anything else is an upstream
-                            # rejection -> 502.
+                            # (reaped/evicted). It gets its own HTTP status so
+                            # callers can ask the user to refresh instead of
+                            # retrying -- but the status must be a real one:
+                            # httptools raises KeyError on 4001 and kills the
+                            # connection. 410 Gone describes it exactly (the
+                            # stored session survives; the runtime one is gone).
+                            # 4007/4008 are not-found style codes; anything else
+                            # is an upstream rejection -> 502.
                             if code in (4007, 4008):
                                 http_code = 404
                             elif code == 4001:
-                                http_code = 4001
+                                http_code = 410
                             else:
                                 http_code = 502
                             future.set_exception(ChatError(str(error.get("message") or "dashboard 请求被拒绝"), http_code))
@@ -152,7 +156,8 @@ class ChatManager:
                     continue
                 name = event.get("type", "")
                 if name not in {"message.start", "message.delta", "message.interim", "message.complete",
-                                "reasoning.delta", "tool.start", "tool.complete", "error", "session.title"}:
+                                "reasoning.delta", "tool.start", "tool.complete", "error", "session.title",
+                                "session.info"}:
                     continue
                 envelope = {**event, **session.identity()}
                 if name == "message.complete":
@@ -190,7 +195,46 @@ class ChatManager:
             self._remember(session)
         return row
 
-    async def start_turn(self, text, stored_session_id=None, profile=None):
+    async def _open_live_session(self, stored_session_id, profile, model=None, provider=None, action="发送"):
+        """Resume (or create) the runtime session for a stored id. Caller holds self.lock.
+
+        ``model``/``provider`` ride along ONLY on ``session.create``: ``session.resume``
+        has no model parameter upstream, so passing one there would be ignored. Existing
+        sessions switch models through ``switch_model`` instead.
+
+        Returns ``(session, running)``; a restored session that is still generating is
+        reported rather than raised here, because sending must refuse it while switching
+        a model may legally queue behind it.
+        """
+        params = {"profile": profile} if profile else {}
+        if stored_session_id:
+            params.update(session_id=stored_session_id, omit_messages=True)
+            result = await self._request("session.resume", params)
+        else:
+            if model:
+                # Upstream honours provider only alongside an explicit model.
+                params.update(model=model, **({"provider": provider} if provider else {}))
+            result = await self._request("session.create", params)
+        runtime_id = result.get("session_id")
+        stored_id = result.get("stored_session_id") or result.get("session_key")
+        if not runtime_id or not stored_id:
+            raise ChatError("dashboard 未返回完整的会话标识")
+        owner = (result.get("info") or {}).get("profile_name") or profile
+        if profile is not None and owner != profile:
+            raise ChatError(f"dashboard 返回的会话归属不匹配，已取消{action}")
+        existing = self.by_runtime.get(runtime_id)
+        if existing and existing.profile != owner:
+            raise ChatError(f"dashboard 返回的运行时会话归属冲突，已取消{action}")
+        if existing and existing.active:
+            raise ChatError(f"该会话仍在生成，请等待完成后再{action}", 409)
+        running = bool(result.get("running") or result.get("inflight"))
+        session = LiveSession(runtime_id, stored_id, owner)
+        if running:
+            session.status = "running"
+        self._remember(session, stored_session_id or stored_id, profile)
+        return session, running
+
+    async def start_turn(self, text, stored_session_id=None, profile=None, model=None, provider=None):
         async with self.lock:
             await self._connect()
             session = self.sessions.get((profile, stored_session_id)) if stored_session_id else None
@@ -203,28 +247,9 @@ class ChatManager:
                 if not row:
                     session.attached = False
             if session is None or not session.attached:
-                params = {"profile": profile} if profile else {}
-                if stored_session_id:
-                    params.update(session_id=stored_session_id, omit_messages=True)
-                    result = await self._request("session.resume", params)
-                else:
-                    result = await self._request("session.create", params)
-                runtime_id = result.get("session_id")
-                stored_id = result.get("stored_session_id") or result.get("session_key")
-                if not runtime_id or not stored_id:
-                    raise ChatError("dashboard 未返回完整的会话标识")
-                owner = (result.get("info") or {}).get("profile_name") or profile
-                if profile is not None and owner != profile:
-                    raise ChatError("dashboard 返回的会话归属不匹配，已取消发送")
-                existing = self.by_runtime.get(runtime_id)
-                if existing and existing.profile != owner:
-                    raise ChatError("dashboard 返回的运行时会话归属冲突，已取消发送")
-                if existing and existing.active:
-                    raise ChatError("该会话仍在生成，请等待完成后再发送", 409)
-                session = LiveSession(runtime_id, stored_id, owner)
-                self._remember(session, stored_session_id or stored_id, profile)
-                if result.get("running") or result.get("inflight"):
-                    session.status = "running"
+                session, running = await self._open_live_session(
+                    stored_session_id, profile, model=model, provider=provider)
+                if running:
                     raise ChatError("恢复的会话仍在运行，未重复提交消息", 409)
             # Claim before yielding so two HTTP requests cannot submit the same live session concurrently.
             session.status = "running"
@@ -285,12 +310,51 @@ class ChatManager:
         try:
             result = await self._request("session.interrupt", {"session_id": session.session_id})
         except ChatError as exc:
-            # 4001 means the runtime id was reaped by the gateway; the stored
+            # 410 = the gateway reaped the runtime id (see _read); the stored
             # session persists, so the user should refresh rather than retry.
-            if exc.status_code == 4001:
-                raise ChatError("会话已不在运行态，请刷新历史确认结果", 4001) from exc
+            if exc.status_code == 410:
+                raise ChatError("会话已不在运行态，请刷新历史确认结果", 410) from exc
             raise
         return result
+
+    async def switch_model(self, stored_session_id, profile, model, provider, confirm_expensive=False):
+        """Switch one live session's model via config.set (session-scoped, never global).
+
+        ``value`` is the CLI string the official picker sends: ``<model> --provider <slug>``.
+        Omitting ``--global`` is what keeps the switch off config.yaml, so the profile
+        default is untouched -- that stays the model-config page's job.
+
+        ``config.set`` needs a live runtime session, so a stored id we are not currently
+        attached to is resumed first. That is cheap: the gateway skips the agent build
+        whenever an explicit provider is given (methods_config_set._set_model), so the
+        switch is recorded as a session override and applied when the next turn builds.
+
+        A turn already streaming is fine -- the gateway stashes the pick and reports
+        ``deferred``, applying it at the next turn start.
+        """
+        async with self.lock:
+            await self._connect()
+            session = self.sessions.get((profile, stored_session_id))
+            if session is not None and not session.attached:
+                session = None
+            if session is None:
+                session, _ = await self._open_live_session(stored_session_id, profile, action="切换模型")
+            result = await self._request("config.set", {
+                "key": "model",
+                "value": f"{model} --provider {provider}",
+                "session_id": session.session_id,
+                "confirm_expensive_model": bool(confirm_expensive),
+            })
+        return {
+            "model": model,
+            "provider": provider,
+            "value": result.get("value") or model,
+            "warning": result.get("warning") or "",
+            "confirm_required": bool(result.get("confirm_required")),
+            "confirm_message": result.get("confirm_message") or "",
+            "deferred": bool(result.get("deferred")),
+            "scope": result.get("scope") or "session",
+        }
 
     async def state(self, stored_session_id, profile=None):
         session = self.sessions.get((profile, stored_session_id))
