@@ -6,6 +6,33 @@ let nextKey = 0;
 const localKey = () => `local-${Date.now()}-${++nextKey}`;
 const identity = (id, profile) => JSON.stringify([String(id), profile || ""]);
 const settledStatuses = ["idle", "complete", "error", "interrupted"];
+// A pair key for <option value>. JSON rather than a delimiter: vendor ids and model
+// names both contain ":", "." and "-", so no separator is safe to invent.
+const modelValue = (provider, model) => (provider && model ? JSON.stringify([provider, model]) : "");
+const parseModelValue = (value) => {
+  try {
+    const pair = JSON.parse(value);
+    return Array.isArray(pair) && pair.length === 2 && pair[0] && pair[1] ? { provider: pair[0], model: pair[1] } : null;
+  } catch { return null; }
+};
+
+// /api/model-configs -> picker groups. Hidden items stay out, and each vendor id is
+// already the provider slug the gateway resolves, so no id mapping is needed.
+function modelGroups(data) {
+  return (Array.isArray(data?.configs) ? data.configs : []).map((vendor) => ({
+    id: String(vendor?.id || ""),
+    name: vendor?.name || vendor?.id || "未命名厂商",
+    items: (Array.isArray(vendor?.items) ? vendor.items : [])
+      .filter((item) => item && !item.hidden && item.model)
+      .map((item) => ({ model: String(item.model), label: item.display_name || String(item.model) })),
+  })).filter((group) => group.id && group.items.length);
+}
+
+function modelDefault(data) {
+  const current = data?.current || {};
+  return current.provider && current.model
+    ? { provider: String(current.provider), model: String(current.model) } : null;
+}
 
 function conversation(selection = {}) {
   return {
@@ -17,6 +44,9 @@ function conversation(selection = {}) {
     checking: false, stateError: "", watchRunning: false,
     historyLoaded: false, historyLoading: false, historyError: "", moreLoading: false,
     offset: 0, hasMore: false, cursorInvalid: false, version: 0, checkEpoch: 0,
+    // Effective model for this conversation. Null falls back to the profile default;
+    // session.info overwrites it with what the session is actually running.
+    model: null, provider: null, modelPending: false, modelNotice: "",
   };
 }
 
@@ -62,6 +92,10 @@ export default function Chat({ active = true }) {
   const stateRequests = useRef(new Map());
   const sendRequests = useRef(new Map());
   const [storageError, setStorageError] = useState("");
+  // Model picker source: the same curated list the model-config page shows, so a
+  // hidden model can never be picked here (and vice versa).
+  const [catalog, setCatalog] = useState({ groups: [], current: null, loading: false, error: "" });
+  const [modelConfirm, setModelConfirm] = useState(null);
   const logRef = useRef(null);
   const inputRef = useRef(null);
   const composing = useRef(false);
@@ -85,6 +119,17 @@ export default function Chat({ active = true }) {
     if (!mounted.current) return;
     listingRef.current = transform(listingRef.current);
     setListing(listingRef.current);
+  }, []);
+
+  const loadCatalog = useCallback(async () => {
+    setCatalog((old) => ({ ...old, loading: true, error: "" }));
+    try {
+      const data = await jsonResponse(await fetch("/api/model-configs"));
+      if (!mounted.current) return;
+      setCatalog({ groups: modelGroups(data), current: modelDefault(data), loading: false, error: "" });
+    } catch (error) {
+      if (mounted.current) setCatalog((old) => ({ ...old, loading: false, error: error.message }));
+    }
   }, []);
 
   const loadSessions = useCallback(async (refresh = false) => {
@@ -225,6 +270,7 @@ export default function Chat({ active = true }) {
   useEffect(() => {
     mounted.current = true;
     void loadSessions(true);
+    void loadCatalog();
     return () => {
       mounted.current = false;
       listRequest.current?.abort();
@@ -232,7 +278,7 @@ export default function Chat({ active = true }) {
       for (const { controller } of stateRequests.current.values()) controller.abort();
       for (const controller of sendRequests.current.values()) controller.abort();
     };
-  }, [loadSessions]);
+  }, [loadSessions, loadCatalog]);
 
   useEffect(() => {
     try {
@@ -346,7 +392,7 @@ export default function Chat({ active = true }) {
     try {
       const response = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
-        body: JSON.stringify({ text, ...(before.storedId ? { stored_session_id: before.storedId } : {}), ...(before.profile ? { profile: before.profile } : {}) }),
+        body: JSON.stringify({ text, ...(before.storedId ? { stored_session_id: before.storedId } : {}), ...(before.profile ? { profile: before.profile } : {}), ...(!before.storedId && before.model && before.provider ? { model: before.model, provider: before.provider } : {}) }),
       });
       if (!response.ok) {
         const data = await response.json().catch(() => null);
@@ -382,6 +428,13 @@ export default function Chat({ active = true }) {
           case "chat.error":
             if (["unknown", "error"].includes(payload.status)) {
               fail(errorText(payload.message, "提交失败，请核对历史后再决定是否重试。"), payload.status === "error" ? "unsent" : "unknown");
+            }
+            break;
+          case "session.info":
+            // The session reports what it is actually running, which also corrects a
+            // reopened conversation whose model we could not know up front.
+            if (payload.model) {
+              change(key, (old) => ({ ...old, model: payload.model, provider: payload.provider || old.provider }));
             }
             break;
           case "error":
@@ -421,6 +474,65 @@ export default function Chat({ active = true }) {
     }
   }
 
+  async function postModelSwitch(key, picked, confirmExpensive) {
+    const target = storeRef.current.conversations[key];
+    const query = target?.profile ? `?profile=${encodeURIComponent(target.profile)}` : "";
+    return jsonResponse(await fetch(`/api/sessions/${encodeURIComponent(target.storedId)}/model${query}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...picked, confirm_expensive_model: confirmExpensive }),
+    }));
+  }
+
+  function modelNotice(data) {
+    // deferred = the gateway queued the pick because a turn is streaming.
+    return data.deferred ? "已记录，本轮结束后生效。" : (data.warning || "");
+  }
+
+  async function pickModel(value) {
+    const key = storeRef.current.selected;
+    const before = storeRef.current.conversations[key];
+    if (!before) return;
+    const picked = parseModelValue(value);
+    if (!picked) {
+      if (!before.storedId) change(key, (old) => ({ ...old, model: null, provider: null, modelNotice: "" }));
+      else change(key, (old) => ({ ...old, modelNotice: "已有会话不能回到跟随默认，请选择一个具体模型。" }));
+      return;
+    }
+    if (!before.storedId) {
+      // A draft has no runtime session yet, so the pick rides along on session.create.
+      change(key, (old) => ({ ...old, ...picked, modelNotice: "" }));
+      return;
+    }
+    change(key, (old) => ({ ...old, modelPending: true, modelNotice: "" }));
+    try {
+      const data = await postModelSwitch(key, picked, false);
+      if (!mounted.current) return;
+      if (data.confirm_required) {
+        change(key, (old) => ({ ...old, modelPending: false }));
+        setModelConfirm({ key, picked, message: data.confirm_message || "该模型价格明显偏高，确认切换？" });
+        return;
+      }
+      change(key, (old) => ({ ...old, ...picked, modelPending: false, modelNotice: modelNotice(data) }));
+    } catch (error) {
+      if (mounted.current) change(key, (old) => ({ ...old, modelPending: false, modelNotice: `切换未生效：${error.message}` }));
+    }
+  }
+
+  async function confirmModelSwitch() {
+    const pending = modelConfirm;
+    setModelConfirm(null);
+    if (!pending || !storeRef.current.conversations[pending.key]) return;
+    const { key, picked } = pending;
+    change(key, (old) => ({ ...old, modelPending: true, modelNotice: "" }));
+    try {
+      const data = await postModelSwitch(key, picked, true);
+      if (!mounted.current) return;
+      change(key, (old) => ({ ...old, ...picked, modelPending: false, modelNotice: modelNotice(data) }));
+    } catch (error) {
+      if (mounted.current) change(key, (old) => ({ ...old, modelPending: false, modelNotice: `切换未生效：${error.message}` }));
+    }
+  }
+
   const locals = Object.values(store.conversations);
   const localIdentities = new Set(locals.filter((item) => item.storedId).map((item) => identity(item.storedId, item.profile)));
   const sessions = [
@@ -433,6 +545,15 @@ export default function Chat({ active = true }) {
   const blocked = current.sending || current.status === "running" || current.checking || current.historyLoading
     || (current.storedId && !current.historyLoaded);
   const toolLabels = { running: "运行中", complete: "完成", unknown: "状态未知", ended: "已结束" };
+  // The session's own model when known (a pick or session.info), else the profile default.
+  const effectiveModel = current.provider && current.model
+    ? { provider: current.provider, model: current.model } : catalog.current;
+  const modelSelection = modelValue(effectiveModel?.provider, effectiveModel?.model);
+  const modelKnown = catalog.groups.some((group) => group.id === effectiveModel?.provider
+    && group.items.some((item) => item.model === effectiveModel?.model));
+  const modelFallback = current.storedId ? "沿用会话当前模型"
+    : catalog.current ? `跟随默认（${catalog.current.model}）` : "跟随默认";
+  const modelBusy = current.modelPending || (current.sending && !current.storedId);
 
   function restoreInput(text) {
     change(current.key, (old) => ({ ...old, input: text }));
@@ -469,8 +590,29 @@ export default function Chat({ active = true }) {
         <header>
           <h1>对话</h1>
           <p className="meta chat-current-title">{current.title}</p>
+          <span className="model-picker-wrap">
+            <label className="chat-sr-only" htmlFor="chat-model-picker">本会话使用的模型</label>
+            <select id="chat-model-picker" className="model-picker" value={modelSelection}
+              disabled={modelBusy || !catalog.groups.length} title={catalog.error || undefined}
+              onChange={(event) => void pickModel(event.target.value)}>
+              <option value="">{modelFallback}</option>
+              {modelSelection && !modelKnown && <option value={modelSelection}>
+                {effectiveModel.model}（{effectiveModel.provider}）
+              </option>}
+              {catalog.groups.map((group) => (
+                <optgroup key={group.id} label={group.name}>
+                  {group.items.map((item) => (
+                    <option key={item.model} value={modelValue(group.id, item.model)}>{item.label}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            {current.modelPending && <span className="model-picker-state" role="status">切换中…</span>}
+          </span>
           {current.storedId && <button type="button" disabled={current.sending || current.historyLoading || current.checking} onClick={retryHistory}>刷新历史与状态</button>}
         </header>
+        {catalog.error && <p className="chat-notice" role="status">模型清单读取失败：{catalog.error}<button type="button" className="link" onClick={() => void loadCatalog()}>重试</button></p>}
+        {current.modelNotice && <p className="chat-notice" role="status">{current.modelNotice}</p>}
         {storageError && <p className="chat-notice" role="status">{storageError}</p>}
         {current.checking && <p className="hint" role="status">正在检查任务状态…</p>}
         {!current.sending && current.status === "running" && <p className="chat-notice" role="status">此会话正在生成，请勿重复提交。每 3 秒检查一次，结束后刷新消息。</p>}
@@ -548,6 +690,19 @@ export default function Chat({ active = true }) {
         </form>
         <p className="hint chat-input-hint" id="chat-input-hint">{current.sending ? "可切换会话或页面，发送会继续；输入内容按会话保留。" : current.status === "running" ? "正在生成，暂不能发送或加载更早消息。" : "Enter 发送 · 输入法选词不会发送 · 失败后不会自动重发"}</p>
       </section>
+
+      {modelConfirm && <div className="modal-mask" onClick={() => setModelConfirm(null)}>
+        <div className="modal" role="dialog" aria-modal="true" aria-labelledby="chat-model-confirm-title"
+          onClick={(event) => event.stopPropagation()}>
+          <h3 id="chat-model-confirm-title">确认切换模型</h3>
+          <p>{modelConfirm.message}</p>
+          <p className="hint">目标是 <b className="mono">{modelConfirm.picked.model}</b>（{modelConfirm.picked.provider}），只影响本会话，不改默认模型。</p>
+          <div className="modal-actions">
+            <button type="button" onClick={() => setModelConfirm(null)}>取消</button>
+            <button type="button" className="danger-solid" onClick={() => void confirmModelSwitch()}>仍然切换</button>
+          </div>
+        </div>
+      </div>}
     </div>
   );
 }
