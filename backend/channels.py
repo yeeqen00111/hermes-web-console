@@ -85,6 +85,17 @@ async def update_feishu_channel(body: FeishuChannelUpdate) -> Dict[str, Any]:
     return resp.json()
 
 
+@router.post("/feishu/restart", dependencies=[Depends(require_app_token)])
+async def restart_feishu_gateway() -> Dict[str, Any]:
+    """重启网关让新配置生效。2026-09-28 真机验证：POST /api/gateway/restart 在本部署
+    （单容器）可用——网关回落约 15~40s（stopped→starting→running）后自动回来，
+    feishu/weixin/api_server 全部重连（fresh updated_at）。转发结果 {ok, pid, name}。"""
+    resp = hc.request("POST", "/api/gateway/restart")
+    if resp.status_code >= 400:
+        raise _upstream_error(resp.status_code)
+    return resp.json()
+
+
 @router.post("/feishu/test", dependencies=[Depends(require_app_token)])
 async def test_feishu_channel() -> Dict[str, Any]:
     resp = hc.request("POST", f"/api/messaging/platforms/{PLATFORM_ID}/test")

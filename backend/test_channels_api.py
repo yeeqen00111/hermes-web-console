@@ -154,6 +154,21 @@ class ChannelsApiTests(unittest.TestCase):
         response = self.client.post("/api/channels/feishu/test")
         self.assertEqual(response.status_code, 502)
 
+    # ── POST restart ──
+
+    def test_post_restart_forwards_to_gateway_restart_and_returns_pid(self):
+        result = {"ok": True, "pid": 77325, "name": "gateway-restart"}
+        self.response(result)
+        response = self.client.post("/api/channels/feishu/restart")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), result)
+        self.request.assert_called_once_with("POST", "/api/gateway/restart")
+
+    def test_post_restart_maps_upstream_failure(self):
+        self.response({}, 500)
+        response = self.client.post("/api/channels/feishu/restart")
+        self.assertEqual(response.status_code, 502)
+
 
 if __name__ == "__main__":
     unittest.main()
