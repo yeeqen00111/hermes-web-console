@@ -81,10 +81,13 @@ flowchart TD
     K2 --> R["restartGateway()<br/>confirm 弹窗 → POST /api/channels/feishu/restart"]
     R --> R2["后端转发 POST /api/gateway/restart"]
     R2 --> R3["网关回落<br/>stopped → starting → running（实测约 15~40s）"]
-    R3 --> R4["前端轮询 GET 卡片<br/>直到 gateway_running && state = connected"]
-    R4 -- 超时 100s --> R5["提示：在服务器 docker restart hermes"]
-    R4 -- 恢复 --> R6["提示：网关已重启，飞书渠道已连接"]
-    R5 --> M
+    R3 --> R4["前端轮询 GET 卡片（messaging 源，不认 /api/status 缓存）<br/>阶段一：先观察到掉线（最大 60s）"]
+    R4 -- 一直没掉线 --> R4A["未观察到重启<br/>可能被冷却合并 → 提示 docker restart 兜底"]
+    R4 -- 观察到掉线 --> R5["阶段二：等到 state=connected（最大 120s）"]
+    R5 -- 超时 --> R5A["提示：网关未恢复，服务器 docker restart hermes"]
+    R5 -- 恢复 --> R6["提示：网关已重启，飞书渠道已连接"]
+    R4A --> M
+    R5A --> M
     R6 --> M
 ```
 
