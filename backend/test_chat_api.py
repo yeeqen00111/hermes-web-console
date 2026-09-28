@@ -1,4 +1,5 @@
 import asyncio
+import http
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -11,7 +12,8 @@ from chat import ChatError, LiveSession
 
 class ChatApiTests(unittest.TestCase):
     def setUp(self):
-        self.manager = SimpleNamespace(start_turn=AsyncMock(), state=AsyncMock(), close=AsyncMock())
+        self.manager = SimpleNamespace(start_turn=AsyncMock(), state=AsyncMock(), interrupt=AsyncMock(),
+                                       switch_model=AsyncMock(), close=AsyncMock())
         self.manager_patch = patch.object(main, "ChatManager", return_value=self.manager)
         self.manager_patch.start()
         self.addCleanup(self.manager_patch.stop)
@@ -96,6 +98,68 @@ class ChatApiTests(unittest.TestCase):
         self.manager.state.assert_awaited_once_with("s", "work")
         self.manager.start_turn.assert_not_called()
         self.request.assert_not_called()
+
+    def assert_http_status(self, response, expected):
+        """TestClient tolerates codes httptools later rejects with KeyError.
+
+        A gateway error raised straight through as HTTP status 4001 crashed the
+        real server (empty reply) while every TestClient assertion still passed,
+        so assert the code is one a real HTTP stack can put on the wire.
+        """
+        http.HTTPStatus(response.status_code)  # ValueError for a made-up code
+        self.assertEqual(response.status_code, expected)
+
+    def test_interrupt_returns_a_real_http_status_for_a_reaped_runtime(self):
+        self.manager.interrupt.side_effect = ChatError("会话已不在运行态，请刷新历史确认结果", 410)
+        response = self.client.post("/api/sessions/stored-1/interrupt?profile=work")
+        self.assert_http_status(response, 410)
+        self.assertEqual(response.json(), {"detail": "会话已不在运行态，请刷新历史确认结果"})
+        self.manager.interrupt.assert_awaited_once_with("stored-1", "work")
+
+    def test_interrupt_rejects_bad_ids_before_the_manager(self):
+        for path in ("/api/sessions/%2E%2E/interrupt", "/api/sessions/a%3Fb/interrupt"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path).status_code, 422)
+        self.manager.interrupt.assert_not_called()
+
+    def test_model_switch_forwards_selection_and_returns_upstream_flags(self):
+        self.manager.switch_model.return_value = {
+            "model": "glm-5.2", "provider": "custom:sensenova", "value": "glm-5.2",
+            "warning": "", "confirm_required": True, "confirm_message": "expensive",
+            "deferred": False, "scope": "session",
+        }
+        response = self.client.post("/api/sessions/stored-1/model?profile=work",
+                                    json={"model": "glm-5.2", "provider": "custom:sensenova"})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        self.assertTrue(response.json()["confirm_required"])
+        self.manager.switch_model.assert_awaited_once_with(
+            "stored-1", "work", "glm-5.2", "custom:sensenova", False)
+
+    def test_model_and_provider_reject_cli_flag_injection(self):
+        """The switch value is space-delimited, so whitespace or a leading -- would forge flags."""
+        for payload in ({"model": "x --global", "provider": "custom:ark"},
+                        {"model": "x", "provider": "custom:ark --global"},
+                        {"model": "x\t--global", "provider": "custom:ark"},
+                        {"model": "--global", "provider": "custom:ark"},
+                        {"model": "x", "provider": "--provider"},
+                        {"provider": "custom:ark"},
+                        {"model": ""}):
+            with self.subTest(payload=payload):
+                response = self.client.post("/api/sessions/stored-1/model", json=payload)
+                self.assertEqual(response.status_code, 422)
+        self.manager.switch_model.assert_not_called()
+
+    def test_chat_body_model_is_forwarded_and_provider_needs_a_model(self):
+        session = LiveSession("runtime-1", "stored-1", None)
+        queue = asyncio.Queue()
+        queue.put_nowait(("message.complete", session.envelope("message.complete", {"status": "complete"})))
+        self.manager.start_turn.return_value = session, queue
+        response = self.client.post("/api/chat", json={"text": "hi", "model": "glm-5.2", "provider": "custom:sensenova"})
+        self.assertEqual(response.status_code, 200)
+        self.manager.start_turn.assert_awaited_once_with("hi", None, None, "glm-5.2", "custom:sensenova")
+        self.assertEqual(self.client.post("/api/chat", json={"text": "hi", "provider": "custom:ark"}).status_code, 422)
+        self.assertEqual(self.client.post("/api/chat", json={"text": "hi", "model": "a --global"}).status_code, 422)
 
 
 if __name__ == "__main__":

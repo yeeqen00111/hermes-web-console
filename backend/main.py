@@ -60,6 +60,20 @@ class LoginBody(BaseModel):
     password: str
 
 
+# Model ids and provider slugs are interpolated into the gateway's whitespace-delimited
+# switch string ("<model> --provider <slug>"), so any whitespace would let a value forge
+# extra CLI flags -- "x --global" alone would persist the pick to config.yaml. A leading
+# "--" is rejected for the same reason. (pydantic-core's regex engine has no lookahead,
+# so the "--" half is a validator rather than part of the pattern.)
+CLI_TOKEN = r"^\S+$"
+
+
+def _no_flag_prefix(value):
+    if value is not None and value.startswith("--"):
+        raise ValueError("模型与厂商标识不能以 -- 开头")
+    return value
+
+
 @app.post("/api/login")
 def login(body: LoginBody):
     """你的系统登录：校验前端账号，返回 app token（后续请求带 Bearer 用）。"""
@@ -73,6 +87,10 @@ class ChatBody(BaseModel):
     stored_session_id: str | None = Field(default=None, min_length=1, max_length=256,
                                           pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     profile: str | None = Field(default=None, min_length=1, max_length=128)
+    # Only honoured when the turn creates a fresh session; existing ones switch
+    # through POST /api/sessions/{id}/model instead (session.resume takes no model).
+    model: str | None = Field(default=None, min_length=1, max_length=256, pattern=CLI_TOKEN)
+    provider: str | None = Field(default=None, min_length=1, max_length=256, pattern=CLI_TOKEN)
 
     @field_validator("text")
     @classmethod
@@ -81,12 +99,35 @@ class ChatBody(BaseModel):
             raise ValueError("消息不能为空")
         return value.strip()
 
+    @field_validator("model", "provider")
+    @classmethod
+    def cli_safe(cls, value):
+        return _no_flag_prefix(value)
+
+    @field_validator("provider")
+    @classmethod
+    def provider_needs_model(cls, value, info):
+        if value and not info.data.get("model"):
+            raise ValueError("provider 需与 model 同时提供")
+        return value
+
+
+class ModelSwitchBody(BaseModel):
+    model: str = Field(min_length=1, max_length=256, pattern=CLI_TOKEN)
+    provider: str = Field(min_length=1, max_length=256, pattern=CLI_TOKEN)
+    confirm_expensive_model: bool = False
+
+    @field_validator("model", "provider")
+    @classmethod
+    def cli_safe(cls, value):
+        return _no_flag_prefix(value)
+
 
 @app.post("/api/chat", dependencies=[Depends(require_app_token)])
 async def chat(body: ChatBody, request: Request):
     try:
         session, queue = await request.app.state.chat_manager.start_turn(
-            body.text, body.stored_session_id, body.profile)
+            body.text, body.stored_session_id, body.profile, body.model, body.provider)
     except ChatError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
     except (requests.RequestException, OSError, asyncio.TimeoutError) as exc:
@@ -157,6 +198,25 @@ async def session_interrupt(request: Request,
         result = await request.app.state.chat_manager.interrupt(session_id, profile)
     except ChatError as exc:
         # 4001 = runtime id 已被 gateway 回收；前端据此提示刷新历史。
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except (OSError, asyncio.TimeoutError) as exc:
+        raise HTTPException(502, "无法连接 dashboard，请稍后重试") from exc
+    return {"ok": True, **result}
+
+
+@app.post("/api/sessions/{session_id}/model", dependencies=[Depends(require_app_token)])
+async def session_model(request: Request, body: ModelSwitchBody,
+                        session_id: str = Path(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+                        profile: str | None = Query(None, min_length=1, max_length=128)):
+    """切换该会话使用的模型。会话级生效，不改 config.yaml 里的默认模型。
+
+    ``confirm_required`` 表示上游要求二次确认（昂贵模型），原样透传给前端。
+    """
+    try:
+        result = await request.app.state.chat_manager.switch_model(
+            session_id, profile, body.model, body.provider, body.confirm_expensive_model)
+    except ChatError as exc:
+        # 410 = runtime 会话已被 gateway 回收，stored 会话仍在；前端提示刷新历史。
         raise HTTPException(exc.status_code, str(exc)) from exc
     except (OSError, asyncio.TimeoutError) as exc:
         raise HTTPException(502, "无法连接 dashboard，请稍后重试") from exc

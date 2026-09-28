@@ -358,9 +358,9 @@ class ChatManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(envelope["stored_session_id"], session.stored_session_id)
         self.assertEqual(envelope["profile"], session.profile)
 
-    async def start(self, text="hello", stored_session_id=None, profile=None):
+    async def start(self, text="hello", stored_session_id=None, profile=None, model=None, provider=None):
         result = await asyncio.wait_for(self.manager.start_turn(
-            text, stored_session_id=stored_session_id, profile=profile,
+            text, stored_session_id=stored_session_id, profile=profile, model=model, provider=provider,
         ), TIMEOUT)
         self.assertIsInstance(result, tuple)
         self.assertEqual(len(result), 2)
@@ -590,10 +590,107 @@ class ChatManagerTests(unittest.IsolatedAsyncioTestCase):
         try:
             await self.assert_chat_error(
                 self.manager.interrupt(session.stored_session_id, session.profile),
-                status=4001, message="会话已不在运行态")
+                status=410, message="会话已不在运行态")
         finally:
             self.ws.send = original_send
             await self.complete(session, queue, status="interrupted")
+
+    async def test_session_info_is_forwarded_to_subscribers(self):
+        session, queue = await self.start()
+        await self.submitted(session)
+        expected = self.ws.emit("session.info", session.session_id, session.stored_session_id, session.profile,
+                                {"model": "glm-5.3-flash", "provider": "custom:ark", "running": True})
+        actual = await self.next_event(queue, "session.info")
+        self.assertEqual(actual, expected, "session.info must reach the browser so the picker shows the real model")
+        await self.complete(session, queue)
+
+    async def test_create_turn_passes_model_and_provider_only_with_a_model(self):
+        cases = (
+            ({"model": "glm-5.3-flash", "provider": "custom:ark"}, {"model": "glm-5.3-flash", "provider": "custom:ark"}),
+            ({"model": "glm-5.3-flash"}, {"model": "glm-5.3-flash"}),
+            # Upstream ignores provider without a model; never send a dangling one.
+            ({"provider": "custom:ark"}, {}),
+            ({}, {}),
+        )
+        for supplied, expected in cases:
+            with self.subTest(supplied=supplied):
+                self.ws.calls.clear()
+                session, queue = await self.start(**supplied)
+                call = self.ws.calls_for("session.create")[0]
+                self.assertEqual({k: call["params"].get(k) for k in ("model", "provider")},
+                                 {k: expected.get(k) for k in ("model", "provider")})
+                await self.complete(session, queue)
+
+    async def test_resume_never_passes_model_because_upstream_ignores_it(self):
+        session, queue = await self.start(stored_session_id="stored-resumed", profile="beta",
+                                          model="glm-5.3-flash", provider="custom:ark")
+        self.assertEqual(self.ws.calls_for("session.create"), [])
+        resumed = self.ws.calls_for("session.resume")[0]
+        self.assertNotIn("model", resumed["params"])
+        self.assertNotIn("provider", resumed["params"])
+        await self.complete(session, queue)
+
+    async def test_switch_model_sends_cli_value_with_runtime_id_for_live_session(self):
+        session, queue = await self.start()
+        await self.submitted(session)
+        self.ws.plan_result("config.set", {"key": "model", "value": "glm-5.2", "scope": "session", "warning": "cheap"})
+        result = await asyncio.wait_for(
+            self.manager.switch_model(session.stored_session_id, session.profile, "glm-5.2", "custom:sensenova"),
+            TIMEOUT)
+        call = self.ws.calls_for("config.set")[0]
+        self.assertEqual(call["params"], {
+            "key": "model",
+            # The exact string the official picker sends; without --global the
+            # switch stays session-scoped and never rewrites config.yaml.
+            "value": "glm-5.2 --provider custom:sensenova",
+            "session_id": session.session_id,
+            "confirm_expensive_model": False,
+        })
+        self.assertEqual(result["model"], "glm-5.2")
+        self.assertEqual(result["provider"], "custom:sensenova")
+        self.assertEqual(result["value"], "glm-5.2")
+        self.assertEqual(result["warning"], "cheap")
+        self.assertFalse(result["confirm_required"])
+        await self.complete(session, queue)
+
+    async def test_switch_model_resumes_an_unattached_stored_session_first(self):
+        self.ws.plan_result("config.set", {"key": "model", "value": "glm-5.2"})
+        result = await asyncio.wait_for(
+            self.manager.switch_model("stored-resumed", "beta", "glm-5.2", "custom:sensenova"), TIMEOUT)
+        self.assertEqual(len(self.ws.calls_for("session.resume")), 1)
+        call = self.ws.calls_for("config.set")[0]
+        self.assertEqual(call["params"]["session_id"], "runtime-resumed")
+        self.assertEqual(result["provider"], "custom:sensenova")
+        self.assertEqual(self.manager.sessions[("beta", "stored-resumed")].session_id, "runtime-resumed")
+
+    async def test_switch_model_surfaces_confirm_required_and_confirms_on_retry(self):
+        session, _ = await self.start()
+        await self.submitted(session)
+        self.ws.plan_result("config.set", {"key": "model", "value": "pricey",
+                                           "confirm_required": True, "confirm_message": "very expensive"})
+        first = await asyncio.wait_for(
+            self.manager.switch_model(session.stored_session_id, session.profile, "pricey", "custom:ark"), TIMEOUT)
+        self.assertTrue(first["confirm_required"])
+        self.assertEqual(first["confirm_message"], "very expensive")
+        self.ws.plan_result("config.set", {"key": "model", "value": "pricey"})
+        second = await asyncio.wait_for(
+            self.manager.switch_model(session.stored_session_id, session.profile, "pricey", "custom:ark",
+                                      confirm_expensive=True), TIMEOUT)
+        self.assertFalse(second["confirm_required"])
+        self.assertEqual(self.ws.calls_for("config.set")[0]["params"]["confirm_expensive_model"], False)
+        self.assertEqual(self.ws.calls_for("config.set")[1]["params"]["confirm_expensive_model"], True)
+
+    async def test_switch_model_during_a_running_turn_is_deferred_not_rejected(self):
+        session, queue = await self.start()
+        await self.submitted(session)
+        self.assertTrue(session.active)
+        self.ws.plan_result("config.set", {"key": "model", "value": "glm-5.2", "deferred": True})
+        result = await asyncio.wait_for(
+            self.manager.switch_model(session.stored_session_id, session.profile, "glm-5.2", "custom:sensenova"),
+            TIMEOUT)
+        self.assertTrue(result["deferred"], "the gateway queues the pick for the next turn start")
+        self.assertFalse(session.task.done(), "a model switch must not disturb the streaming turn")
+        await self.complete(session, queue)
 
     async def test_concurrent_resume_allows_only_one_turn_and_returns_busy_409(self):
         self.ws.hold.add("session.resume")
