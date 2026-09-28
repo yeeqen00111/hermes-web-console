@@ -90,6 +90,17 @@ td.num { text-align: right; }
 .chat { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .chat header { margin-bottom: 8px; flex-shrink: 0; }
 .chat-current-title { max-width: 100%; overflow-wrap: anywhere; }
+/* ── 对话页模型下拉 ─────────────────────────────── */
+.model-picker-wrap { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.model-picker {
+  font-size: 12px; padding: 4px 8px; border-radius: 8px;
+  border: 1px solid #d5d9de; background: #fff; color: #2b313b;
+  max-width: 240px; cursor: pointer;
+}
+.model-picker:hover:not(:disabled) { border-color: #2160f3; }
+.model-picker:focus-visible { outline: 2px solid #2160f3; outline-offset: 2px; }
+.model-picker:disabled { opacity: .6; cursor: not-allowed; }
+.model-picker-state { font-size: 11px; color: #8a9199; white-space: nowrap; }
 .chat-log { flex: 1; min-height: 100px; overflow-y: auto; overscroll-behavior: contain; padding: 8px 6px 16px; display: flex; flex-direction: column; gap: 12px; }
 .chat-log > * { flex-shrink: 0; }
 .chat-turn { display: flex; flex-direction: column; gap: 12px; }
