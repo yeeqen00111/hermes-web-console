@@ -54,6 +54,10 @@ app.add_middleware(
 from modelcfg import router as modelcfg_router  # noqa: E402
 app.include_router(modelcfg_router)
 
+# 消息渠道（飞书）路由
+from channels import router as channels_router  # noqa: E402
+app.include_router(channels_router)
+
 
 class LoginBody(BaseModel):
     username: str
