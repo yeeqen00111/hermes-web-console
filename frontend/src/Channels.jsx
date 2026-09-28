@@ -143,29 +143,60 @@ export default function Channels() {
 
   const restartGateway = async () => {
     const okay = window.confirm(
-      "重启网关会让 feishu / weixin / api_server 等渠道短暂断线（约半分钟），正在进行的会话会被中断。确定重启吗？"
+      "重启网关会让 feishu / weixin / api_server 等渠道短暂断线（约半分钟到一分钟），正在进行的会话会被中断。确定重启吗？"
     );
     if (!okay) return;
     setRestarting(true);
     setNotice(null);
     setTest(null);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const readCard = async () => {
+      try {
+        const c = await api("/api/channels/feishu");
+        if (!c.ok) return null;
+        return await c.json();
+      } catch {
+        return null;
+      }
+    };
     try {
       const r = await api("/api/channels/feishu/restart", { method: "POST" });
       if (!r.ok) { setNotice({ kind: "err", text: "重启请求失败：" + (await errorText(r)) }); return; }
-      setNotice({ kind: "ok", text: "重启指令已下发，等待网关恢复…" });
-      // 轮询直到网关在跑且飞书 connected（真机实测约 15~40s 回来）
+      setNotice({ kind: "ok", text: "重启指令已下发，等待网关掉线后再恢复…" });
+
+      // 阶段一：先观察到掉线（gateway_running=false 或 state≠connected），证明真重启。
+      // 只认 card（messaging 源），不认 /api/status 缓存。超时约 60s。
+      let dropped = false;
       for (let t = 0; t < 20; t++) {
-        await new Promise((res) => setTimeout(res, 5000));
-        const c = await api("/api/channels/feishu");
-        if (!c.ok) continue;
-        const fresh = await c.json();
-        if (fresh.gateway_running && fresh.state === "connected") {
-          setCard(fresh);
-          setNotice({ kind: "ok", text: `网关已重启，飞书渠道已连接。` });
-          return;
+        await sleep(3000);
+        const card = await readCard();
+        if (card && (!card.gateway_running || card.state !== "connected")) {
+          dropped = true;
+          setNotice({ kind: "ok", text: "网关已掉线，等待恢复…" });
+          break;
         }
       }
-      setNotice({ kind: "err", text: "等待超时，网关未恢复——请在服务器执行 docker restart hermes。" });
+      setCard(await readCard() || undefined);
+      // 阶段二：等到 connected 才算成功。超时约 120s → 服务器 docker restart 兜底。
+      for (let t = 0; t < 40; t++) {
+        await sleep(3000);
+        const card = await readCard();
+        if (card && card.gateway_running && card.state === "connected") {
+          setCard(card);
+          setNotice({
+            kind: "ok",
+            text: dropped ? "网关已重启，飞书渠道已连接。" : "网关已在运行，飞书渠道已连接（未观察到掉线）。",
+          });
+          return;
+        }
+        if (card) setCard(card); // 顺带刷新展示状态
+      }
+      setNotice({
+        kind: "err",
+        text: dropped
+          ? "网关掉线后未恢复——请在服务器执行 docker restart hermes。"
+          : "未观察到网关重启（可能被冷却合并），配置是否生效不确定；如需生效请在服务器执行 docker restart hermes。",
+      });
     } catch (e) {
       setNotice({ kind: "err", text: "重启失败：" + e.message });
     } finally {
