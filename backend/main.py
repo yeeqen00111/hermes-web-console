@@ -58,6 +58,10 @@ app.include_router(modelcfg_router)
 from channels import router as channels_router  # noqa: E402
 app.include_router(channels_router)
 
+# Agent 身份文件（SOUL / MEMORY / USER，仅 default profile）路由
+from agentfiles import router as agentfiles_router  # noqa: E402
+app.include_router(agentfiles_router)
+
 
 class LoginBody(BaseModel):
     username: str
