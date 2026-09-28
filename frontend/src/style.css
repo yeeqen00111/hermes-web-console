@@ -342,3 +342,46 @@ button.ghost.tiny.danger-soft { color: #d4382d; }
 
 .channel-actions button.restart { background: #d4382d; border-color: #d4382d; color: #fff; }
 .channel-actions button.restart:hover { background: #b52d23; border-color: #b52d23; }
+
+/* ── 身份配置页（SOUL / MEMORY / USER）──────────────── */
+.identity .id-card {
+  margin-top: 16px; padding: 20px;
+  border: 1px solid #e3e6ea; border-radius: 12px; background: #fff;
+}
+.identity .id-card h2 { margin: 0; font-size: 15px; color: #1f2329; letter-spacing: 0; }
+.identity .id-prompt { margin: 10px 0 0; font-size: 13px; color: #5b6370; line-height: 1.7; }
+.identity .id-prompt.warn { color: #8a5b00; }
+.identity .id-effect {
+  display: inline-block; margin: 10px 0 8px; padding: 5px 10px;
+  font-size: 12px; color: #8a5b00; background: #fff8e6;
+  border: 1px solid #eed9a0; border-radius: 8px;
+}
+.identity .id-editor {
+  display: block; width: 100%; box-sizing: border-box; min-height: 200px; resize: vertical;
+  font-family: ui-monospace, Consolas, "Microsoft YaHei", monospace;
+  font-size: 13px; line-height: 1.65; padding: 12px 14px; border-radius: 8px;
+  border: 1px solid #d5d9de; background: #fff; color: #1d232b;
+}
+.identity .id-editor:focus { outline: 2px solid #bfd0ff; border-color: #2160f3; }
+.identity .id-editor:read-only { background: #f6f7f9; color: #8a9199; }
+.identity .id-editor::placeholder { color: #b3b9c1; }
+
+.identity .id-example { margin-top: 10px; font-size: 12px; color: #8a9199; }
+.identity .id-example summary { cursor: pointer; color: #2160f3; }
+.identity .id-example pre {
+  margin: 8px 0; padding: 10px 12px; border-radius: 8px;
+  background: #f6f7f9; border: 1px solid #e3e6ea;
+  font-size: 12px; line-height: 1.7; color: #3d4450; white-space: pre-wrap; word-break: break-word;
+}
+
+.identity .id-notice { margin: 12px 0; padding: 10px 14px; border-radius: 8px; font-size: 13px; }
+.identity .id-notice.ok { background: #e7f6ec; color: #1f6b39; border: 1px solid #b5e0c4; }
+.identity .id-notice.err { background: #fdecea; color: #a4271d; border: 1px solid #f3c1bd; }
+.identity .id-conflict {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 0 0 10px; padding: 10px 14px; border-radius: 8px; font-size: 13px;
+  background: #fff8e6; color: #8a5b00; border: 1px solid #eed9a0;
+}
+.identity .id-saved { font-size: 12px; color: #1f6b39; }
+.identity .state-block { padding: 24px 16px; }
+.identity .footnote { font-size: 12px; color: #8a9199; margin-top: 16px; line-height: 1.7; }
