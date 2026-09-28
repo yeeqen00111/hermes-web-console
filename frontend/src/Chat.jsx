@@ -401,6 +401,26 @@ export default function Chat({ active = true }) {
     }
   }
 
+  async function stopManual() {
+    const currentConversation = storeRef.current.conversations[storeRef.current.selected];
+    // Only stop a turn we are actively streaming; without a stored id the
+    // upstream has no live session to interrupt. Keep the SSE stream open and
+    // let the interrupted terminal event finish the turn naturally.
+    if (!currentConversation?.sending || !currentConversation.storedId) return;
+    const key = currentConversation.key;
+    change(key, (old) => ({ ...old, warning: "", error: "" }));
+    try {
+      const query = currentConversation.profile ? `?profile=${encodeURIComponent(currentConversation.profile)}` : "";
+      const data = await jsonResponse(await fetch(`/api/sessions/${encodeURIComponent(currentConversation.storedId)}/interrupt${query}`, { method: "POST" }));
+      if (!mounted.current) return;
+      if (data?.status === "not_interrupted") {
+        change(key, (old) => ({ ...old, warning: "上游没有可中断的任务，等待当前回合自然结束。" }));
+      }
+    } catch (error) {
+      if (mounted.current) change(key, (old) => ({ ...old, warning: `停止请求未确认：${error.message}（流式仍在继续，可稍后再试或刷新历史）。` }));
+    }
+  }
+
   const locals = Object.values(store.conversations);
   const localIdentities = new Set(locals.filter((item) => item.storedId).map((item) => identity(item.storedId, item.profile)));
   const sessions = [
@@ -522,7 +542,9 @@ export default function Chat({ active = true }) {
               }
             }}
             aria-describedby="chat-input-hint" placeholder="说点什么…（Enter 发送）" />
-          <button type="submit" disabled={blocked || !current.input.trim()}>{current.sending ? "发送中…" : "发送"}</button>
+          {current.sending
+            ? <button type="button" className="stop-button" onClick={stopManual}>停止</button>
+            : <button type="submit" disabled={blocked || !current.input.trim()}>发送</button>}
         </form>
         <p className="hint chat-input-hint" id="chat-input-hint">{current.sending ? "可切换会话或页面，发送会继续；输入内容按会话保留。" : current.status === "running" ? "正在生成，暂不能发送或加载更早消息。" : "Enter 发送 · 输入法选词不会发送 · 失败后不会自动重发"}</p>
       </section>

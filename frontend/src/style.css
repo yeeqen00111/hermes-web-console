@@ -119,6 +119,8 @@ td.num { text-align: right; }
 .chat-input-row { display: flex; gap: 8px; margin: 8px 0 0; flex-shrink: 0; }
 .chat-input-row .search { margin: 0; flex: 1; min-width: 0; width: auto; }
 .chat-input-row button { white-space: nowrap; flex-shrink: 0; }
+button.stop-button { background: #d4382d; border-color: #d4382d; color: #fff; }
+button.stop-button:hover { background: #b52d23; border-color: #b52d23; }
 .chat-input-hint { margin: 8px 0 0; line-height: 1.5; }
 .chat-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (max-width: 760px) {
