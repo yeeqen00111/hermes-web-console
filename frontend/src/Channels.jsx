@@ -62,6 +62,7 @@ export default function Channels() {
   const [notice, setNotice] = useState(null);      // {kind:'ok'|'err', text} 保存结果提示
   const [testing, setTesting] = useState(false);
   const [test, setTest] = useState(null);          // {ok, message} 检查状态结果
+  const [restarting, setRestarting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -115,7 +116,7 @@ export default function Channels() {
         kind: "ok",
         text: d.hot_served
           ? `已保存。`
-          : `已保存。单容器模式下需在服务器执行 docker restart hermes 才会生效。`,
+          : `已保存。点「重启网关生效」加载新配置（或服务器执行 docker restart hermes）。`,
       });
       await load();
     } catch (e) {
@@ -137,6 +138,38 @@ export default function Channels() {
       setTest({ ok: false, message: "请求失败：" + e.message });
     } finally {
       setTesting(false);
+    }
+  };
+
+  const restartGateway = async () => {
+    const okay = window.confirm(
+      "重启网关会让 feishu / weixin / api_server 等渠道短暂断线（约半分钟），正在进行的会话会被中断。确定重启吗？"
+    );
+    if (!okay) return;
+    setRestarting(true);
+    setNotice(null);
+    setTest(null);
+    try {
+      const r = await api("/api/channels/feishu/restart", { method: "POST" });
+      if (!r.ok) { setNotice({ kind: "err", text: "重启请求失败：" + (await errorText(r)) }); return; }
+      setNotice({ kind: "ok", text: "重启指令已下发，等待网关恢复…" });
+      // 轮询直到网关在跑且飞书 connected（真机实测约 15~40s 回来）
+      for (let t = 0; t < 20; t++) {
+        await new Promise((res) => setTimeout(res, 5000));
+        const c = await api("/api/channels/feishu");
+        if (!c.ok) continue;
+        const fresh = await c.json();
+        if (fresh.gateway_running && fresh.state === "connected") {
+          setCard(fresh);
+          setNotice({ kind: "ok", text: `网关已重启，飞书渠道已连接。` });
+          return;
+        }
+      }
+      setNotice({ kind: "err", text: "等待超时，网关未恢复——请在服务器执行 docker restart hermes。" });
+    } catch (e) {
+      setNotice({ kind: "err", text: "重启失败：" + e.message });
+    } finally {
+      setRestarting(false);
     }
   };
 
@@ -257,14 +290,24 @@ export default function Channels() {
           })}
 
           <div className="channel-actions">
-            <button className="ghost" onClick={load} disabled={loading}>刷新</button>
-            <button onClick={save} disabled={saving || !dirty}>
+            <button
+              className="ghost"
+              onClick={load}
+              disabled={loading || restarting}
+            >
+              刷新
+            </button>
+            <button className="restart" onClick={restartGateway} disabled={saving || restarting || dirty}
+                    title={dirty ? "有未保存的改动，先保存再重启" : "重启网关让新配置生效"}>
+              {restarting ? "重启中…" : "重启网关生效"}
+            </button>
+            <button onClick={save} disabled={saving || restarting || !dirty}>
               {saving ? "保存中…" : "保存"}
             </button>
           </div>
           <p className="footnote">
             字段三态：未动 = 保持原样；输入 = 覆盖保存；点「✕ 清除」 = 删除该配置。
-            密钥字段只显示是否已配置，不回显原文。
+            密钥字段只显示是否已配置，不回显原文。保存后需「重启网关生效」（或服务器 docker restart hermes）。
           </p>
         </div>
       )}

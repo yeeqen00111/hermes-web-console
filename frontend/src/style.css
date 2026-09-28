@@ -339,3 +339,6 @@ button.ghost.tiny.danger-soft { color: #d4382d; }
 
 .channel-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }
 .channels .footnote { font-size: 12px; color: #8a9199; margin-top: 12px; }
+
+.channel-actions button.restart { background: #d4382d; border-color: #d4382d; color: #fff; }
+.channel-actions button.restart:hover { background: #b52d23; border-color: #b52d23; }
