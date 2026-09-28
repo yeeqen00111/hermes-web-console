@@ -148,6 +148,21 @@ async def session_state(request: Request,
         raise HTTPException(502, "暂时无法确认生成状态，请刷新历史；不会自动重发") from exc
 
 
+@app.post("/api/sessions/{session_id}/interrupt", dependencies=[Depends(require_app_token)])
+async def session_interrupt(request: Request,
+                            session_id: str = Path(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+                            profile: str | None = Query(None, min_length=1, max_length=128)):
+    """停止本进程内正在生成的回合；中断后的终态经原 SSE 流自然收尾。"""
+    try:
+        result = await request.app.state.chat_manager.interrupt(session_id, profile)
+    except ChatError as exc:
+        # 4001 = runtime id 已被 gateway 回收；前端据此提示刷新历史。
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except (OSError, asyncio.TimeoutError) as exc:
+        raise HTTPException(502, "无法连接 dashboard，请稍后重试") from exc
+    return {"ok": True, **result}
+
+
 def _guard(resp):
     if not resp.ok:
         raise HTTPException(status_code=502, detail=f"Hermes {resp.status_code}: {resp.text[:500]}")

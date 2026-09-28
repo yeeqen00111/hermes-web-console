@@ -544,6 +544,57 @@ class ChatManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(session.task.done())
         await self.complete(session, queue)
 
+    async def test_interrupt_sends_session_interrupt_with_runtime_id_for_active_turn(self):
+        self.ws.plan_result("session.interrupt", {"status": "interrupted"})
+        session, queue = await self.start()
+        await self.submitted(session)
+        # The turn is still running (no terminal yet) -> interrupt is allowed.
+        result = await asyncio.wait_for(
+            self.manager.interrupt(session.stored_session_id, session.profile), TIMEOUT)
+        call = await self.ws.wait_calls("session.interrupt")
+        self.assertEqual(call["params"]["session_id"], session.session_id)
+        self.assertEqual(result, {"status": "interrupted"})
+        # The original SSE stream is left open; the interrupted terminal arrives separately.
+        await self.complete(session, queue, status="interrupted")
+
+    async def test_interrupt_rejects_when_not_active_without_calling_upstream(self):
+        session = await self.idle_session()
+        await self.assert_chat_error(
+            self.manager.interrupt(session.stored_session_id, session.profile), status=409)
+        self.assertEqual(self.ws.calls_for("session.interrupt"), [])
+
+    async def test_interrupt_rejects_unknown_stored_session_without_calling_upstream(self):
+        await self.assert_chat_error(self.manager.interrupt("stored-unknown", "alpha"), status=409)
+        self.assertEqual(self.ws.calls_for("session.interrupt"), [])
+
+    async def test_interrupt_propagates_4001_as_refresh_hint(self):
+        session, queue = await self.start()
+        await self.submitted(session)
+        # Intercept the outgoing session.interrupt frame and answer it with a real
+        # 4001 (runtime id reaped by the gateway), exercising the error-code mapping.
+        original_send = self.ws.send
+
+        async def send_with_4001(raw):
+            frame_sent = json.loads(raw)
+            if frame_sent.get("method") == "session.interrupt":
+                self.ws.calls.append(frame_sent)
+                # Echo the error back with the SAME id the request used; _read
+                # resolves the pending future by matching this id.
+                err_frame = {"jsonrpc": "2.0", "id": frame_sent["id"],
+                             "error": {"code": 4001, "message": "session not found"}}
+                self.ws.incoming.put_nowait(json.dumps(err_frame))
+                return
+            await original_send(raw)
+
+        self.ws.send = send_with_4001
+        try:
+            await self.assert_chat_error(
+                self.manager.interrupt(session.stored_session_id, session.profile),
+                status=4001, message="会话已不在运行态")
+        finally:
+            self.ws.send = original_send
+            await self.complete(session, queue, status="interrupted")
+
     async def test_concurrent_resume_allows_only_one_turn_and_returns_busy_409(self):
         self.ws.hold.add("session.resume")
         first = self.background(self.manager.start_turn("first", "stored-resumed", "beta"))

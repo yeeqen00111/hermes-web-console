@@ -123,8 +123,19 @@ class ChatManager:
                     if not future.done():
                         if "error" in frame:
                             error = frame["error"]
-                            code = 404 if error.get("code") in (4007, 4008) else 502
-                            future.set_exception(ChatError(str(error.get("message") or "dashboard 请求被拒绝"), code))
+                            code = error.get("code")
+                            # 4001 = runtime session not in the gateway process
+                            # (reaped/evicted); surface it so callers can ask the
+                            # user to refresh instead of retrying. 4007/4008 are
+                            # not-found style codes. Anything else is an upstream
+                            # rejection -> 502.
+                            if code in (4007, 4008):
+                                http_code = 404
+                            elif code == 4001:
+                                http_code = 4001
+                            else:
+                                http_code = 502
+                            future.set_exception(ChatError(str(error.get("message") or "dashboard 请求被拒绝"), http_code))
                         else:
                             future.set_result(frame.get("result") or {})
                     continue
@@ -254,6 +265,32 @@ class ChatManager:
                     task.cancel()
             await asyncio.gather(submit, terminal, return_exceptions=True)
             session.subscribers.clear()
+
+    async def interrupt(self, stored_session_id, profile=None):
+        """Stop the running turn for a session live in this process.
+
+        Only sessions we are actively driving can be interrupted; sessions
+        started elsewhere or already finished must be refreshed instead. The
+        upstream interrupt is a no-op cleanup on an idle turn (it still
+        reports "interrupted"), so we gate on our own active flag rather than
+        trusting the upstream result. The terminal message.complete(status=
+        "interrupted") then arrives on the existing SSE stream unchanged.
+        """
+        session = self.sessions.get((profile, stored_session_id))
+        if session is None or not session.attached:
+            raise ChatError("会话不在本次运行中，请刷新历史后再决定是否停止", 409)
+        if not session.active:
+            raise ChatError("该会话当前没有正在生成的内容", 409)
+        await self._connect()
+        try:
+            result = await self._request("session.interrupt", {"session_id": session.session_id})
+        except ChatError as exc:
+            # 4001 means the runtime id was reaped by the gateway; the stored
+            # session persists, so the user should refresh rather than retry.
+            if exc.status_code == 4001:
+                raise ChatError("会话已不在运行态，请刷新历史确认结果", 4001) from exc
+            raise
+        return result
 
     async def state(self, stored_session_id, profile=None):
         session = self.sessions.get((profile, stored_session_id))
