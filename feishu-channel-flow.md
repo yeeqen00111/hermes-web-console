@@ -6,11 +6,26 @@
 
 ## 总览
 
-```
-Channels.jsx                    channels.py                      messaging.py（上游）
-  load()   ──GET /api/channels/feishu──▶ get_feishu_channel ──GET /api/messaging/platforms──▶ _platform_payloads
-  save()   ──PUT /api/channels/feishu──▶ update_feishu_channel ──PUT /api/messaging/platforms/feishu──▶ remove/save_env + enabled
-  runTest()──POST /api/channels/feishu/test──▶ test_feishu_channel ──POST …/feishu/test──▶ 状态机判定
+```mermaid
+flowchart LR
+    subgraph 前端 [前端 React · 5173]
+        L1["load()"]
+        S1["save()"]
+        T1["runTest()"]
+    end
+    subgraph 后端 [自研 FastAPI · 8000]
+        L2["GET /api/channels/feishu"]
+        S2["PUT /api/channels/feishu"]
+        T2["POST /api/channels/feishu/test"]
+    end
+    subgraph Hermes [Hermes dashboard · 8426→9119]
+        L3["GET /api/messaging/platforms"]
+        S3["PUT /api/messaging/platforms/feishu"]
+        T3["POST /api/messaging/platforms/feishu/test"]
+    end
+    L1 --> L2 --> L3
+    S1 --> S2 --> S3
+    T1 --> T2 --> T3
 ```
 
 三条链路全部**不带 `?profile=`**（unscoped）= 管「正在跑的那份网关」的配置。密钥明文**只在「浏览器→自研后端→Hermes 保存」这一瞬间存在**，上游只回 `is_set`/脱敏值，后端错误回显永远不含响应体。
@@ -35,6 +50,32 @@ Channels.jsx                    channels.py                      messaging.py（
 ---
 
 ## B. 保存（写）
+
+**保存落地流程图**（前端点击 → 后端转发 → Hermes 落盘）：
+
+```mermaid
+flowchart TD
+    A([点「保存」]) --> B["前端拼 body<br/>env = 动过的键 / clear_env = ✕ 的键 / enabled = 拨过的开关"]
+    B --> C{"有改动吗?<br/>(env 非空 / clear_env 非空 / enabled≠null)"}
+    C -- 没有 --> C0["保存按钮本来就是禁用态<br/>不发请求"]
+    C -- 有 --> D["fetch PUT /api/channels/feishu"]
+    D --> E{"后端白名单<br/>env+clear_env 每个键 ∈ 6 键?"}
+    E -- 否 --> E1["400 返回<br/>『xxx 不是飞书可配置项』<br/>不发上游"]
+    E -- 是 --> F["逐字转发<br/>hc.request PUT /api/messaging/platforms/feishu<br/>body={enabled, env, clear_env}"]
+    F --> G["Hermes 按顺序应用"]
+    G --> G1["① clear_env 每个键<br/>remove_env_value = 真删除"]
+    G --> G2["② env 每个键<br/>空串被跳过=不改 / 非空 save_env_value 写 .env"]
+    G --> G3["③ enabled 非空<br/>写 config.yaml platforms.feishu.enabled"]
+    G1 --> H["返回 {ok, platform, hot_served}"]
+    G2 --> H
+    G3 --> H
+    H --> I["后端透传结果"]
+    I --> J{"hot_served ?"}
+    J -- true --> K1["已保存 · 网关已热生效"]
+    J -- false --> K2["已保存 · 需在服务器执行<br/>docker restart hermes 生效"]
+    K1 --> M["自动 load() 重拉<br/>刷新 is_set 与状态徽标"]
+    K2 --> M
+```
 
 | 步骤 | 动作 | 数据 |
 |---|---|---|
