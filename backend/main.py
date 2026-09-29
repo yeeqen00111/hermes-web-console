@@ -276,3 +276,15 @@ def dashboard_status():
     except HTTPException as exc:
         raise HTTPException(status_code=exc.status_code,
                             detail=f"Hermes 不可达: {exc.detail}")
+
+
+# ── 生产静态资源（Docker 镜像内 vite build 产物）──────────────
+# 本机 dev 时 backend/ 外没有 static/ 目录 → 不挂载，前端照旧走 Vite(5173)。
+# 镜像里 /app/static 存在 → 挂到 "/"（html=True 直接出 index.html），/api/* 路由
+# 已先注册、优先级更高，前端相对路径 fetch("/api/...") 天然同源，无需代理/CORS。
+from pathlib import Path  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")

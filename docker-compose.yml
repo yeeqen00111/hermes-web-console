@@ -1,0 +1,14 @@
+# 部署机一键部署：把本文件复制为 .env 填好后
+#   docker compose up -d
+# .env 已被 .gitignore 挡掉，绝不入库、绝不进镜像。
+services:
+  app:
+    image: ghcr.io/yeeqen00111/hermes-web-console:${TAG:-latest}
+    container_name: hermes-web-console
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      HERMES_BASE: ${HERMES_BASE:-http://localhost:8426}
+      HERMES_USER: ${HERMES_USER:-admin}
+      HERMES_PASS: ${HERMES_PASS:?必须在同目录 .env 里设置 HERMES_PASS}
