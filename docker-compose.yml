@@ -1,6 +1,12 @@
-# 部署机一键部署：把本文件复制为 .env 填好后
-#   docker compose up -d
-# .env 已被 .gitignore 挡掉，绝不入库、绝不进镜像。
+# ③ 单跑 Web Console —— 用**已发布的镜像**（部署机用）
+#
+#   1) 同目录放 .env（照 .env.example 填）
+#   2) docker compose up -d
+#   3) http://<部署机>:8000
+#
+# 从源码构建镜像用 docker-compose.build.yml；
+# 要和 Hermes Agent 一体部署用 docker-compose.with-hermes.yml。
+
 services:
   app:
     image: ghcr.io/yeeqen00111/hermes-web-console:${TAG:-latest}
@@ -12,3 +18,10 @@ services:
       HERMES_BASE: ${HERMES_BASE:-http://localhost:8426}
       HERMES_USER: ${HERMES_USER:-admin}
       HERMES_PASS: ${HERMES_PASS:?必须在同目录 .env 里设置 HERMES_PASS}
+      # 我们的 SQLite（自定义/隐藏模型条目）落到卷里，容器重建不丢
+      HIDDEN_DB_PATH: /data/hidden_models.db
+    volumes:
+      - console-data:/data
+
+volumes:
+  console-data:

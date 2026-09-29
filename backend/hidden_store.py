@@ -5,10 +5,14 @@
 所以「从可选列表移除」用本存储实现。）"""
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
-_DB_PATH = Path(__file__).resolve().parent / "hidden_models.db"
+# 默认与代码同级（本机 dev 行为不变）。容器部署时用 HIDDEN_DB_PATH 指向挂载卷——
+# 不把单文件挂进容器：宿主机上文件不存在时 Docker 会把它建成**目录**，sqlite 直接打不开。
+_DB_PATH = Path(os.environ.get("HIDDEN_DB_PATH")
+                or Path(__file__).resolve().parent / "hidden_models.db")
 
 
 def _conn() -> sqlite3.Connection:
