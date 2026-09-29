@@ -1,0 +1,15 @@
+# 构建上下文排除（别把秘密和垃圾送进镜像 —— 镜像公开后每层都可被解开）
+.git
+.gitignore
+.env
+**/.env
+**/CLAUDE.md
+**/*.md
+node_modules
+**/node_modules
+frontend/dist
+**/__pycache__
+**/*.pyc
+backend/hidden_models.db
+backend/probe_*.py
+backend/test_*.py
