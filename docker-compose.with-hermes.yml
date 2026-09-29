@@ -1,0 +1,70 @@
+# ② Hermes Agent + Web Console —— **一体部署**（同机全套）
+#
+#   1) 同目录放 .env（照 .env.example 填）
+#   2) docker compose -f docker-compose.with-hermes.yml up -d
+#   3) Web Console: http://<host>:8000    Hermes dashboard: http://<host>:9119
+#
+# ⚠️ 这台机器上 Hermes 如果已经在跑（容器名 hermes），本文件会**重建它**：
+#    生成中的会话会中断、飞书等渠道断线十几秒。只想加控制台、不想动 Hermes 的，
+#    用 docker-compose.yml（单跑控制台，HERMES_BASE 指到现有 dashboard）即可。
+#
+# 网络：两个服务都用 host（与官方部署一致）——控制台因此能用 127.0.0.1:9119 直达
+# dashboard，不绕公网代理。host 网络下 ports 无效，端口由各自进程直接监听（8000 / 9119）。
+#
+# 账号只有一组：HERMES_USER / HERMES_PASS 既喂 dashboard 的 basic auth，
+# 也喂控制台去登录它 —— 一处定义、两处使用，不用把密码复制两遍。
+
+services:
+  gateway:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ~/.hermes:/opt/data
+      - /opt/agentops/log:/opt/agentops/log
+      - /opt/agentops/gitrepo:/opt/agentops/gitrepo
+      - /opt/agentops/nacos:/opt/agentops/nacos
+    environment:
+      # ── Web Dashboard（同容器 s6 服务）──────────────────────────────
+      # 非回环绑定强制鉴权门，必须配 BASIC_AUTH，否则 dashboard 启动 fail closed。
+      - HERMES_DASHBOARD=1
+      - HERMES_DASHBOARD_HOST=0.0.0.0
+      - HERMES_DASHBOARD_PORT=9119
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_USER:-admin}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_PASS:?必须在 .env 里设置 HERMES_PASS}
+      # ────────────────────────────────────────────────────────────────
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      # OpenAI 兼容 API server。不用就把这三行一起注释掉。
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_ENABLED=true
+      - API_SERVER_KEY=${API_SERVER_KEY:?不上 API server 就注释掉这三行}
+    command: ["gateway", "run"]
+    # 健康探针：探 gateway 自己的 control socket（container up ≠ gateway 活着）
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/hermes/.venv/bin/python -c \"from gateway.control_socket import identify_gateway as f; exit(0 if f('/opt/data') else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  console:
+    image: ghcr.io/yeeqen00111/hermes-web-console:${TAG:-latest}
+    container_name: hermes-web-console
+    restart: unless-stopped
+    # 同用 host：容器里的 127.0.0.1:9119 就是宿主上的 dashboard
+    network_mode: host
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      HERMES_BASE: ${HERMES_BASE:-http://127.0.0.1:9119}
+      HERMES_USER: ${HERMES_USER:-admin}
+      HERMES_PASS: ${HERMES_PASS:?必须在 .env 里设置 HERMES_PASS}
+      HIDDEN_DB_PATH: /data/hidden_models.db
+    volumes:
+      - console-data:/data
+
+volumes:
+  console-data:

@@ -1,0 +1,32 @@
+# ① 单跑 Web Console —— 从**源码构建镜像**（开发机 / 发版机用）
+#
+#   docker compose -f docker-compose.build.yml build          # 构建
+#   docker compose -f docker-compose.build.yml push           # 推 ghcr（需 write:packages 的 PAT）
+#   docker compose -f docker-compose.build.yml up -d          # 本机直接跑起来
+#
+# 镜像名与 docker-compose.yml 完全一致 → 这里 build 完 push，那边就能拉。
+# 想换标签：TAG=v0.3（或在同目录 .env 里设）。
+#
+# ⚠️ 镜像不含任何秘密：HERMES_* 一律运行时从 .env 注入（.dockerignore 已挡掉 .env）。
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/yeeqen00111/hermes-web-console:${TAG:-latest}
+    container_name: hermes-web-console
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      HERMES_BASE: ${HERMES_BASE:-http://localhost:8426}
+      HERMES_USER: ${HERMES_USER:-admin}
+      HERMES_PASS: ${HERMES_PASS:?必须在同目录 .env 里设置 HERMES_PASS}
+      # 我们的 SQLite（自定义/隐藏模型条目）落到卷里，容器重建不丢
+      HIDDEN_DB_PATH: /data/hidden_models.db
+    volumes:
+      - console-data:/data
+
+volumes:
+  console-data:
