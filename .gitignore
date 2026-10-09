@@ -4,6 +4,20 @@
 
 # ── 本地记忆 / AI 配置（含服务器信息，仅本机使用）──
 CLAUDE.md
+**/CLAUDE.md
+.claude/
+.zcodeignore
+
+# ── 本机设计 / 流程文档（不入公司仓库）──
+model-configs-flow.md
+chat-design.md
+chat-message-parsing.md
+feishu-channel-flow.md
+v0.3-features-design.md
+agent-identity-files-design.md
+channel-integration-design.md
+design/
+design-selfbuild/
 
 # ── Python ──
 __pycache__/
