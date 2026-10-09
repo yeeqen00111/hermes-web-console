@@ -272,7 +272,18 @@ button.link.confirm:hover { text-decoration: none; background: #b52d23; }
 .cell-input { font-size: 12px; padding: 4px 8px; border-radius: 6px; border: 1px solid #d5d9de; width: 100%; min-width: 160px; }
 .cell-input:focus { outline: 2px solid #bfd0ff; border-color: #2160f3; }
 
-/* ── 消息渠道页（飞书）────────────────────────────── */
+/* ── 消息渠道页（飞书 / 钉钉）──────────────────────── */
+/* 平台切换器：次级导航，比顶部 .tabs 轻（顶部是实心蓝，这里是描边+浅蓝底） */
+.channels .platform-tabs { display: flex; gap: 8px; margin: 14px 0 2px; }
+.channels .platform-tab {
+  padding: 6px 18px; font-size: 14px; cursor: pointer;
+  color: #5b6370; background: #fff;
+  border: 1px solid #d5d9de; border-radius: 999px;
+}
+.channels .platform-tab:hover:not(:disabled) { border-color: #2160f3; color: #2160f3; }
+.channels .platform-tab.active { color: #2160f3; background: #eef3ff; border-color: #b6caff; font-weight: 500; }
+.channels .platform-tab:disabled { opacity: .5; cursor: default; }
+
 .channels .channel-card {
   max-width: 720px; margin-top: 16px; padding: 20px;
   border: 1px solid #e3e6ea; border-radius: 12px; background: #fff;

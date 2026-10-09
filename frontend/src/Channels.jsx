@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 
-// 消息渠道页 —— 飞书（2026-09-28 定案）：只管理「正在跑的那份网关」的飞书配置
-// （后端 /api/channels 无 profile 维度，单网关模式）。
+// 消息渠道页 —— 飞书 / 钉钉（2026-10-09 由「只做飞书」扩展而来）：只管理「正在跑的那份网关」的
+// 渠道配置（后端 /api/channels 无 profile 维度，单网关模式）。
+//
+// 平台清单与后端白名单一一对应（backend/channels.py: ALLOWED_PLATFORMS）。
+// 加平台 = 这里加一项 + 下面 PLATFORM_FIELDS 加一组字段表。
+//
+// ⚠️ 「重启网关生效」是**网关级**操作：一次重启所有渠道（飞书/钉钉/微信…）+ 正在进行的对话。
+// 上游没有单平台重启的口子，前端也没有更小的粒度可选。
 //
 // 密钥/字段三态语义（与后端及 Hermes PUT 对齐）：
 //   - 没动   → 保存时不发该键（保持原样）
@@ -10,20 +16,40 @@ import { useCallback, useEffect, useState } from "react";
 // 密钥字段只显示「是否已配置」，不回显原文（上游只回 redacted_value）。
 // 保存后单容器模式需在服务器执行 docker restart hermes 才生效（后端返回 hot_served 指示）
 
-const FEISHU_FIELDS = [
-  { key: "FEISHU_APP_ID", label: "App ID", required: true, secret: false,
-    hint: "飞书开放平台应用的 App ID（cli_ 开头）" },
-  { key: "FEISHU_APP_SECRET", label: "App Secret", required: true, secret: true,
-    hint: "飞书开放平台应用的 App Secret" },
-  { key: "FEISHU_ENCRYPT_KEY", label: "加密密钥", required: false, secret: true,
-    hint: "事件订阅的加密密钥（Encrypt Key，订阅事件时一般需要）" },
-  { key: "FEISHU_VERIFICATION_TOKEN", label: "验证令牌", required: false, secret: true,
-    hint: "事件订阅的验证令牌（Verification Token）" },
-  { key: "FEISHU_DOMAIN", label: "域名", required: false, secret: false,
-    hint: "开放平台域名，默认 https://open.feishu.cn" },
-  { key: "FEISHU_ALLOWED_USERS", label: "允许用户", required: false, secret: false,
-    hint: "逗号分隔的允许使用本机器人的飞书用户，留空 = 不限制" },
+const PLATFORMS = [
+  { id: "feishu", label: "飞书" },
+  { id: "dingtalk", label: "钉钉" },
 ];
+
+const PLATFORM_FIELDS = {
+  feishu: [
+    { key: "FEISHU_APP_ID", label: "App ID", required: true, secret: false,
+      hint: "飞书开放平台应用的 App ID（cli_ 开头）" },
+    { key: "FEISHU_APP_SECRET", label: "App Secret", required: true, secret: true,
+      hint: "飞书开放平台应用的 App Secret" },
+    { key: "FEISHU_ENCRYPT_KEY", label: "加密密钥", required: false, secret: true,
+      hint: "事件订阅的加密密钥（Encrypt Key，订阅事件时一般需要）" },
+    { key: "FEISHU_VERIFICATION_TOKEN", label: "验证令牌", required: false, secret: true,
+      hint: "事件订阅的验证令牌（Verification Token）" },
+    { key: "FEISHU_DOMAIN", label: "域名", required: false, secret: false,
+      hint: "开放平台域名，默认 https://open.feishu.cn" },
+    { key: "FEISHU_ALLOWED_USERS", label: "允许用户", required: false, secret: false,
+      hint: "逗号分隔的允许使用本机器人的飞书用户，留空 = 不限制" },
+  ],
+
+  // 钉钉只有 Stream 模式（出连长连），没有 HTTP 推送、也没有模式开关；
+  // 也不需要公网回调地址——所以这里没有「域名/加密密钥/验证令牌」那类 webhook 字段。
+  dingtalk: [
+    { key: "DINGTALK_CLIENT_ID", label: "Client ID", required: true, secret: false,
+      hint: "钉钉开放平台应用的 AppKey（Client ID）" },
+    { key: "DINGTALK_CLIENT_SECRET", label: "Client Secret", required: true, secret: true,
+      hint: "钉钉开放平台应用的 AppSecret" },
+    { key: "DINGTALK_ALLOWED_USERS", label: "允许用户", required: false, secret: false,
+      hint: "逗号分隔的允许使用本机器人的钉钉用户 ID" },
+    { key: "DINGTALK_WEBHOOK_URL", label: "机器人 Webhook", required: false, secret: false,
+      hint: "可选。只在定时/主动推送时用，不填不影响正常对话" },
+  ],
+};
 
 const STATE_BADGES = {
   connected: { label: "已连接", cls: "ok" },
@@ -51,7 +77,8 @@ async function errorText(r) {
 }
 
 export default function Channels() {
-  const [card, setCard] = useState(null);          // 后端返回的 feishu 平台卡
+  const [platform, setPlatform] = useState(PLATFORMS[0].id);  // 当前平台（后端白名单内）
+  const [card, setCard] = useState(null);          // 后端返回的平台卡
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [draft, setDraft] = useState({});          // key → 输入值（存在键 = 已修改，保存进 env）
@@ -64,11 +91,14 @@ export default function Channels() {
   const [test, setTest] = useState(null);          // {ok, message} 检查状态结果
   const [restarting, setRestarting] = useState(false);
 
+  const label = PLATFORMS.find((p) => p.id === platform)?.label || platform;
+  const fields = PLATFORM_FIELDS[platform] || [];
+
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError("");
     try {
-      const r = await api("/api/channels/feishu");
+      const r = await api(`/api/channels/${platform}`);
       if (!r.ok) { setLoadError(await errorText(r)); return; }
       const data = await r.json();
       setCard(data);
@@ -81,8 +111,9 @@ export default function Channels() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [platform]);
 
+  // platform 变了 → load 是新函数 → 自动重跑（顺带把编辑态重置掉）
   useEffect(() => { load(); }, [load]);
 
   const envMeta = (key) => (card?.env_vars || []).find((e) => e.key === key);
@@ -106,7 +137,7 @@ export default function Channels() {
       if (Object.keys(draft).length) body.env = draft;
       if (clearSet.size) body.clear_env = [...clearSet];
       if (enabled !== null) body.enabled = enabled;
-      const r = await api("/api/channels/feishu", { method: "PUT", body: JSON.stringify(body) });
+      const r = await api(`/api/channels/${platform}`, { method: "PUT", body: JSON.stringify(body) });
       const d = await r.json();
       if (!r.ok) {
         setNotice({ kind: "err", text: "保存失败：" + (await errorText(r)) });
@@ -130,7 +161,7 @@ export default function Channels() {
     setTesting(true);
     setTest(null);
     try {
-      const r = await api("/api/channels/feishu/test", { method: "POST" });
+      const r = await api(`/api/channels/${platform}/test`, { method: "POST" });
       const d = await r.json();
       if (!r.ok) { setTest({ ok: false, message: await errorText(r) }); return; }
       setTest({ ok: !!d.ok, message: d.message || (d.ok ? "连接正常" : "状态未就绪") });
@@ -143,7 +174,7 @@ export default function Channels() {
 
   const restartGateway = async () => {
     const okay = window.confirm(
-      "重启网关会让 feishu / weixin / api_server 等渠道短暂断线（约半分钟到一分钟），正在进行的会话会被中断。确定重启吗？"
+      "重启网关是全局操作：会让所有消息渠道（飞书、钉钉、微信等）和正在进行的对话短暂断线（约半分钟到一分钟）。确定重启吗？"
     );
     if (!okay) return;
     setRestarting(true);
@@ -152,7 +183,7 @@ export default function Channels() {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const readCard = async () => {
       try {
-        const c = await api("/api/channels/feishu");
+        const c = await api(`/api/channels/${platform}`);
         if (!c.ok) return null;
         return await c.json();
       } catch {
@@ -160,7 +191,7 @@ export default function Channels() {
       }
     };
     try {
-      const r = await api("/api/channels/feishu/restart", { method: "POST" });
+      const r = await api(`/api/channels/${platform}/restart`, { method: "POST" });
       if (!r.ok) { setNotice({ kind: "err", text: "重启请求失败：" + (await errorText(r)) }); return; }
       setNotice({ kind: "ok", text: "重启指令已下发，等待网关掉线后再恢复…" });
 
@@ -169,8 +200,8 @@ export default function Channels() {
       let dropped = false;
       for (let t = 0; t < 20; t++) {
         await sleep(3000);
-        const card = await readCard();
-        if (card && (!card.gateway_running || card.state !== "connected")) {
+        const c = await readCard();
+        if (c && (!c.gateway_running || c.state !== "connected")) {
           dropped = true;
           setNotice({ kind: "ok", text: "网关已掉线，等待恢复…" });
           break;
@@ -180,16 +211,16 @@ export default function Channels() {
       // 阶段二：等到 connected 才算成功。超时约 120s → 服务器 docker restart 兜底。
       for (let t = 0; t < 40; t++) {
         await sleep(3000);
-        const card = await readCard();
-        if (card && card.gateway_running && card.state === "connected") {
-          setCard(card);
+        const c = await readCard();
+        if (c && c.gateway_running && c.state === "connected") {
+          setCard(c);
           setNotice({
             kind: "ok",
-            text: dropped ? "网关已重启，飞书渠道已连接。" : "网关已在运行，飞书渠道已连接（未观察到掉线）。",
+            text: dropped ? `网关已重启，${label}渠道已连接。` : `网关已在运行，${label}渠道已连接（未观察到掉线）。`,
           });
           return;
         }
-        if (card) setCard(card); // 顺带刷新展示状态
+        if (c) setCard(c); // 顺带刷新展示状态
       }
       setNotice({
         kind: "err",
@@ -211,21 +242,36 @@ export default function Channels() {
     <div className="page channels">
       <header>
         <h1>消息渠道</h1>
-        <p className="meta">飞书 / Lark · 正在运行的网关上的飞书配置（单网关模式，无需选择 profile）。</p>
+        <p className="meta">飞书 / 钉钉 · 正在运行的网关上的渠道配置（单网关模式，无需选择 profile）。</p>
       </header>
+
+      <nav className="platform-tabs" aria-label="选择消息渠道">
+        {PLATFORMS.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            className={`platform-tab${p.id === platform ? " active" : ""}`}
+            aria-pressed={p.id === platform}
+            onClick={() => setPlatform(p.id)}
+            disabled={restarting}
+          >
+            {p.label}
+          </button>
+        ))}
+      </nav>
 
       {loading ? (
         <p className="hint">加载中…</p>
       ) : !card ? (
         <div className="state-block">
-          <p>{loadError || "无法加载飞书渠道信息。"}</p>
+          <p>{loadError || `无法加载${label}渠道信息。`}</p>
           <button className="ghost" onClick={load}>重试</button>
         </div>
       ) : (
         <div className="channel-card">
           {card.docs_url && (
             <p className="meta">
-              <a href={card.docs_url} target="_blank" rel="noreferrer">飞书开放平台接入文档 ↗</a>
+              <a href={card.docs_url} target="_blank" rel="noreferrer">{label}开放平台接入文档 ↗</a>
             </p>
           )}
 
@@ -251,7 +297,7 @@ export default function Channels() {
           )}
 
           <div className="field-row toggle-row">
-            <span className="field-name">启用飞书渠道</span>
+            <span className="field-name">启用{label}渠道</span>
             <span className={`chip ${current ? "on" : "off"}`}>{current ? "启用中" : "已停用"}</span>
             <button
               type="button"
@@ -265,7 +311,7 @@ export default function Channels() {
             {enabled !== null && <span className="field-hint">开关已改，保存后生效</span>}
           </div>
 
-          {FEISHU_FIELDS.map((f) => {
+          {fields.map((f) => {
             const meta = envMeta(f.key);
             const isSet = !!meta?.is_set;
             const cleared = clearSet.has(f.key);
@@ -329,7 +375,7 @@ export default function Channels() {
               刷新
             </button>
             <button className="restart" onClick={restartGateway} disabled={saving || restarting || dirty}
-                    title={dirty ? "有未保存的改动，先保存再重启" : "重启网关让新配置生效"}>
+                    title={dirty ? "有未保存的改动，先保存再重启" : "重启网关让新配置生效（影响所有渠道）"}>
               {restarting ? "重启中…" : "重启网关生效"}
             </button>
             <button onClick={save} disabled={saving || restarting || !dirty}>
@@ -339,6 +385,8 @@ export default function Channels() {
           <p className="footnote">
             字段三态：未动 = 保持原样；输入 = 覆盖保存；点「✕ 清除」 = 删除该配置。
             密钥字段只显示是否已配置，不回显原文。保存后需「重启网关生效」（或服务器 docker restart hermes）。
+            <br />
+            重启是<b>网关级</b>操作，会同时影响飞书、钉钉等<b>所有</b>渠道——上游没有单平台重启的接口。
           </p>
         </div>
       )}
