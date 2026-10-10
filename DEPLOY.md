@@ -26,7 +26,7 @@
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `HERMES_BASE` | 是 | dashboard 地址。本机/远程 `http://<服务器IP>:8426`；一体部署用 `http://127.0.0.1:9119` |
+| `HERMES_BASE` | 是 | dashboard 地址。本机/远程 `http://<服务器IP>:8426`；**Linux 一体部署**（host 网络）用 `http://127.0.0.1:9119`；**Docker Desktop**（容器 bridge 网络）必须用 `http://host.docker.internal:9119` —— 容器里的 `127.0.0.1` 是容器自己，连不上宿主发布的端口 |
 | `HERMES_USER` | 是 | dashboard basic 账号（默认 `admin`） |
 | `HERMES_PASS` | 是 | dashboard basic 密码（compose 用 `:?` 强制，未设则拒绝启动） |
 | `TAG` | 否 | 镜像标签，默认 `latest` |
@@ -71,6 +71,7 @@ docker compose -f docker-compose.with-hermes.yml up -d
 ```
 
 - 两个服务均 `network_mode: host`（`ports` 失效，端口由进程直接监听）：控制台用 `127.0.0.1:9119` 直达 dashboard，不绕公网代理
+- ⚠️ **Docker Desktop（Windows/Mac）上不要用本文件**：这里的 `host` 指 WSL2/VM 而不是宿主，`8000`/`9119` 都不会转发到 Windows。改用两个独立 compose（各自 bridge + `ports`），`HERMES_BASE=http://host.docker.internal:9119`
 - 账号只有一组：`HERMES_USER`/`HERMES_PASS` 同时喂 dashboard basic auth 和控制台登录
 - `gateway` 健康探针探 gateway control socket（container up ≠ gateway 活着）；`console` 依赖其 healthy
 - ⚠️ **若本机 Hermes 已在跑（容器名 `hermes`），本文件会重建它**：生成中的会话中断、飞书等渠道断线十几秒。只想加控制台，用场景 A
