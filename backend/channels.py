@@ -6,6 +6,10 @@
 （web_routers/messaging.py:792/851/916），platform_id 限 ALLOWED_PLATFORMS。
 不做多平台全量、不做 profile 维度（多网关同跑是服务器侧 multiplex_mode 的事，页面改不了）。
 
+重启网关是**唯一例外**：全站只有一个固定入口 `POST /api/channels/feishu/restart`，
+路径里的 feishu 是**固定段、不是平台**（网关级动作，不按平台分；见 restart_gateway）。
+别把这条也参数化——那会凭空多出第二条重启路径。
+
 平台白名单
 ==========
 上游 catalogue 有 30 个平台，本层只放行**已在生产验证过**的两个：
@@ -67,6 +71,15 @@ def _upstream_error(status: int, platform_id: str) -> HTTPException:
     if status == 404:
         return HTTPException(status_code=404, detail=f"{name}平台不在 Hermes 渠道目录中")
     return HTTPException(status_code=502, detail=f"Hermes 渠道接口请求失败（HTTP {status}）")
+
+
+def _gateway_error(status: int) -> HTTPException:
+    """重启网关的上游错误：文案里不出现任何平台名——这是网关级动作，没有"哪个平台"可言。"""
+    if status in (400, 409):
+        return HTTPException(status_code=status, detail="Hermes 拒绝了本次重启网关请求")
+    if status == 404:
+        return HTTPException(status_code=404, detail="Hermes 网关重启接口不存在（上游版本不匹配）")
+    return HTTPException(status_code=502, detail=f"Hermes 网关接口请求失败（HTTP {status}）")
 
 
 def _fetch_card(platform_id: str) -> Dict[str, Any]:
@@ -140,21 +153,25 @@ async def test_channel(platform_id: str = PLATFORM_PATH) -> Dict[str, Any]:
     return resp.json()
 
 
-@router.post("/{platform_id}/restart", dependencies=[Depends(require_app_token)])
-async def restart_gateway(platform_id: str = PLATFORM_PATH) -> Dict[str, Any]:
-    """重启网关让新配置生效。2026-09-28 真机验证：POST /api/gateway/restart 在本部署
-    （单容器）可用——网关回落约 15~40s（stopped→starting→running）后自动回来，
-    feishu/weixin/api_server 全部重连（fresh updated_at）。转发结果 {ok, pid, name}。
+@router.post("/feishu/restart", dependencies=[Depends(require_app_token)])
+async def restart_gateway() -> Dict[str, Any]:
+    """重启网关让新配置生效。**全站只有这一个重启入口**（2026-10-12 定案）。
+
+    路径里的 `feishu` 是**固定段，不是平台参数**——这条接口的语义就是"重启网关"，
+    与前端当前选的是哪个平台无关：飞书 tab、钉钉 tab 都只打这一条。
+    `/api/channels/dingtalk/restart` 之类的第二形态**不存在**（404，且不打上游）。
+
+    2026-09-28 真机验证：POST /api/gateway/restart 在本部署（单容器）可用——网关回落约
+    15~40s（stopped→starting→running）后自动回来，feishu/weixin/api_server 全部重连
+    （fresh updated_at）。转发结果 {ok, pid, name}。
 
     ⚠️ 这是**网关级**操作：一次重启**所有**渠道（feishu/dingtalk/weixin/api_server…）和
-    正在进行的对话。路径里的 platform_id 只是与同平台其他动作保持路径一致（不破坏既有调用），
-    **不代表"只重启该平台"**——上游没有单平台重启的口子：`/api/gateway/restart`
+    正在进行的对话。上游没有单平台重启的口子：`/api/gateway/restart`
     （hermes_cli/web_routers/actions.py:139）拉的就是 `hermes gateway restart`（整个进程）；
     网关内部虽有 _platform_reconnect_watcher 能单独重连某个平台，但只由内部连接失败触发，
     没有任何外部入口。要"一个个重启"必须改 hermes-agent 源码——那是禁止的。
     """
-    _require_platform(platform_id)
     resp = hc.request("POST", "/api/gateway/restart")
     if resp.status_code >= 400:
-        raise _upstream_error(resp.status_code, platform_id)
+        raise _gateway_error(resp.status_code)
     return resp.json()

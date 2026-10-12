@@ -254,22 +254,35 @@ class ChannelsApiTests(unittest.TestCase):
         self.test_status = 500
         self.assertEqual(self.client.post("/api/channels/feishu/test").status_code, 502)
 
-    # ── POST restart ──
+    # ── POST restart（全站唯一入口：固定段 feishu）──
 
     def test_post_restart_forwards_to_gateway_restart_and_returns_pid(self):
-        for pid in ALLOWED_PLATFORMS:
-            with self.subTest(platform=pid):
-                self.request.reset_mock()
-                response = self.client.post(f"/api/channels/{pid}/restart")
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json(), self.restart_result)
-                # 网关级：两个平台打到同一个上游端点，路径里的 platform_id 不参与
-                self.assertEqual(self.calls("POST"),
-                                 [call("POST", "/api/gateway/restart")])
+        response = self.client.post("/api/channels/feishu/restart")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), self.restart_result)
+        self.assertEqual(self.calls("POST"), [call("POST", "/api/gateway/restart")])
+
+    def test_restart_has_exactly_one_path(self):
+        """重启网关只有 /api/channels/feishu/restart 一条：路径里的 feishu 是固定段。
+
+        任何"平台形态"的第二条路径都必须 404 且**不打上游**——包括白名单内的 dingtalk。
+        """
+        self.request.reset_mock()
+        for path in ("/api/channels/dingtalk/restart", "/api/channels/weixin/restart"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path).status_code, 404)
+        self.request.assert_not_called()
 
     def test_post_restart_maps_upstream_failure(self):
         self.restart_status = 500
         self.assertEqual(self.client.post("/api/channels/feishu/restart").status_code, 502)
+
+    def test_post_restart_error_text_is_gateway_scoped(self):
+        """上游拒绝时文案是网关口径——重启是网关级动作，不该出现"飞书渠道配置请求"。"""
+        self.restart_status = 409
+        response = self.client.post("/api/channels/feishu/restart")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"], "Hermes 拒绝了本次重启网关请求")
 
     # ── 对外契约：飞书文案逐字不变（参数化不得改变既有调用者的可观察行为）──
 
