@@ -8,6 +8,8 @@ import { useCallback, useEffect, useState } from "react";
 //
 // ⚠️ 「重启网关生效」是**网关级**操作：一次重启所有渠道（飞书/钉钉/微信…）+ 正在进行的对话。
 // 上游没有单平台重启的口子，前端也没有更小的粒度可选。
+// 接口是**唯一固定的一条**：POST /api/channels/feishu/restart——路径里的 feishu 是固定段、
+// 不是平台，飞书/钉钉 tab 都打它。别按当前 tab 参数化，那会凭空多出第二条重启路径。
 //
 // 密钥/字段三态语义（与后端及 Hermes PUT 对齐）：
 //   - 没动   → 保存时不发该键（保持原样）
@@ -191,7 +193,8 @@ export default function Channels() {
       }
     };
     try {
-      const r = await api(`/api/channels/${platform}/restart`, { method: "POST" });
+      // 固定一条：feishu 是路径固定段，不是平台（见文件头注释与后端 channels.py）
+      const r = await api("/api/channels/feishu/restart", { method: "POST" });
       if (!r.ok) { setNotice({ kind: "err", text: "重启请求失败：" + (await errorText(r)) }); return; }
       setNotice({ kind: "ok", text: "重启指令已下发，等待网关掉线后再恢复…" });
 

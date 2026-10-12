@@ -216,6 +216,10 @@ data: {"type":"<事件名>","session_id":"...","stored_session_id":"...","profil
 
 ### `POST /api/channels/feishu/restart`
 重启网关让新配置生效（期间渠道短暂断线）。
+
+> **路径里的 `feishu` 是固定段，不是平台参数。** 这条接口的语义就是「重启网关」——前端无论当前在飞书 tab 还是钉钉 tab，都只调这一条，**不要**按平台拼第二条（`POST /api/channels/dingtalk/restart` 不存在，返回 `404`）。
+> 它是**网关级**操作：一次调用重启整个网关，所有渠道（飞书 / 钉钉 / 微信 / api_server…）和正在进行的对话都会短暂断线（单容器实测回落约 15~40s 自动恢复）。上游没有单平台重启的口子。
+
 - `200`：`{ "ok": true, "pid": ..., "name": "..." }`
 
 ---
