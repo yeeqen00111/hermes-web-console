@@ -17,6 +17,10 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 
 
 def _load_env_file() -> None:
+    # 两个文件都读（2026-10-12 修：原来「命中第一个就 break」，一旦 backend/.env 存在，
+    # 根 .env 整份就不读了——HERMES_BASE/USER/PASS 全丢，所有走 dashboard 的接口静默落到默认值）。
+    # 优先级不变：先读 backend/.env，后读根 .env；setdefault 让「先读到的赢」，
+    # 真实环境变量仍旧优先于任何文件。
     for p in (_BACKEND_DIR / ".env", _BACKEND_DIR.parent / ".env"):
         if not p.exists():
             continue
@@ -26,7 +30,6 @@ def _load_env_file() -> None:
                 continue
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-        break
 
 
 _load_env_file()
@@ -40,6 +43,22 @@ APP_TOKEN = os.environ.get("APP_TOKEN", secrets.token_urlsafe(32))
 APP_USER = os.environ.get("APP_USER", "admin")
 APP_PASS = os.environ.get("APP_PASS", "secret")
 APP_AUTH = os.environ.get("APP_AUTH", "").strip().lower() in {"1", "true", "yes"}
+
+# ── 智能问数：共享的数据库注册表（与 hermes-mcp 同一个 SQLite 文件）──────────────
+# 两端各自直读直写这个文件，没有网络调用、没有 import 依赖；唯一的约定是
+# 「表结构 + 密码加密格式」，见 backend/dbconn.py 的模块注释。
+# 相对路径按 backend/ 目录解析（不受启动时工作目录影响）。
+# 默认值与 hermes-mcp 的默认路径一致（它未设 HERMESMCP_DB_CONFIG 时就是 <项目根>/db_connections.db）。
+_db_config_raw = os.environ.get("HERMESMCP_DB_CONFIG", "").strip()
+HERMESMCP_DB_PATH = Path(_db_config_raw) if _db_config_raw else (_BACKEND_DIR.parent / "hermes-mcp" / "db_connections.db")
+if not HERMESMCP_DB_PATH.is_absolute():
+    HERMESMCP_DB_PATH = (_BACKEND_DIR / HERMESMCP_DB_PATH).resolve()
+
+# 存库密码的加密 key，必须与 hermes-mcp 侧完全一致；缺失时不静默降级（拒绝保存密码）。
+HERMESMCP_DB_KEY = os.environ.get("HERMESMCP_DB_KEY", "").strip()
+
+# Hermes 上注册的 MCP 服务名（问数那条）。服务名要进代理路径，故做成配置项，不写死在代码里。
+MCP_SERVER_NAME = os.environ.get("MCP_SERVER_NAME", "sql-coustm").strip() or "sql-coustm"
 
 
 # ── Hermes 客户端：惰性登录（首次请求才登录），401 自动重登重试 ──

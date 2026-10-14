@@ -3,3 +3,5 @@ uvicorn
 requests
 websockets
 PyYAML
+# 智能问数：数据库密码加解密（dbconn.py 的 Fernet），格式与 hermes-mcp 的 store.py 一致
+cryptography
