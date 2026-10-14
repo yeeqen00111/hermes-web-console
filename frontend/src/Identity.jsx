@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { api, errorText } from "./api.js";
 
 // 身份配置页（2026-09-28）—— 编辑**默认 Agent** 的三个身份 / 记忆文件：
 //   soul   SOUL.md    身份设定（Hermes 自带默认模板，Agent 不会自行改写）
@@ -65,22 +66,6 @@ const CARDS = [
 const CARDS_BY_NAME = Object.fromEntries(CARDS.map((c) => [c.name, c]));
 const NAMES = CARDS.map((c) => c.name);
 const EFFECT_HINT = "修改在下一轮新会话生效，当前会话不受影响。";
-
-function api(path, opts = {}) {
-  return fetch(path, {
-    headers: opts.body ? { "Content-Type": "application/json" } : undefined,
-    ...opts,
-  });
-}
-
-async function errorText(r) {
-  try {
-    const d = await r.json();
-    return d?.detail || `HTTP ${r.status}`;
-  } catch {
-    return `HTTP ${r.status}`;
-  }
-}
 
 export default function Identity() {
   const [files, setFiles] = useState({});      // name → {loading,exists,content,byteSize,truncated,binary,error}

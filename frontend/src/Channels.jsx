@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { api, errorText } from "./api.js";
 
 // 消息渠道页 —— 飞书 / 钉钉（2026-10-09 由「只做飞书」扩展而来）：只管理「正在跑的那份网关」的
 // 渠道配置（后端 /api/channels 无 profile 维度，单网关模式）。
@@ -61,22 +62,6 @@ const STATE_BADGES = {
   gateway_stopped: { label: "网关未运行", cls: "err" },
   startup_failed: { label: "网关启动失败", cls: "err" },
 };
-
-function api(path, opts = {}) {
-  return fetch(path, {
-    headers: opts.body ? { "Content-Type": "application/json" } : undefined,
-    ...opts,
-  });
-}
-
-async function errorText(r) {
-  try {
-    const d = await r.json();
-    return d?.detail || `HTTP ${r.status}`;
-  } catch {
-    return `HTTP ${r.status}`;
-  }
-}
 
 export default function Channels() {
   const [platform, setPlatform] = useState(PLATFORMS[0].id);  // 当前平台（后端白名单内）
@@ -248,12 +233,12 @@ export default function Channels() {
         <p className="meta">飞书 / 钉钉 · 正在运行的网关上的渠道配置（单网关模式，无需选择 profile）。</p>
       </header>
 
-      <nav className="platform-tabs" aria-label="选择消息渠道">
+      <nav className="sub-tabs" aria-label="选择消息渠道">
         {PLATFORMS.map((p) => (
           <button
             key={p.id}
             type="button"
-            className={`platform-tab${p.id === platform ? " active" : ""}`}
+            className={`sub-tab${p.id === platform ? " active" : ""}`}
             aria-pressed={p.id === platform}
             onClick={() => setPlatform(p.id)}
             disabled={restarting}

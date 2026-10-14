@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { api } from "./api.js";
 
 // 模型配置管理页：厂商（自定义端点）→ 模型 两级结构。
 // 添加/编辑 = 弹框表单（模型ID/显示名称/最高token/思考等级）；
@@ -23,13 +24,6 @@ const EMPTY_MODEL_VALUES = {
   context_length: "",   // 最高 token
   reasoning_effort: "", // 思考等级
 };
-
-function api(path, opts = {}) {
-  return fetch(path, {
-    headers: opts.body ? { "Content-Type": "application/json" } : undefined,
-    ...opts,
-  });
-}
 
 export default function ModelConfigs() {
   const [configs, setConfigs] = useState([]);

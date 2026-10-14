@@ -273,16 +273,7 @@ button.link.confirm:hover { text-decoration: none; background: #b52d23; }
 .cell-input:focus { outline: 2px solid #bfd0ff; border-color: #2160f3; }
 
 /* ── 消息渠道页（飞书 / 钉钉）──────────────────────── */
-/* 平台切换器：次级导航，比顶部 .tabs 轻（顶部是实心蓝，这里是描边+浅蓝底） */
-.channels .platform-tabs { display: flex; gap: 8px; margin: 14px 0 2px; }
-.channels .platform-tab {
-  padding: 6px 18px; font-size: 14px; cursor: pointer;
-  color: #5b6370; background: #fff;
-  border: 1px solid #d5d9de; border-radius: 999px;
-}
-.channels .platform-tab:hover:not(:disabled) { border-color: #2160f3; color: #2160f3; }
-.channels .platform-tab.active { color: #2160f3; background: #eef3ff; border-color: #b6caff; font-weight: 500; }
-.channels .platform-tab:disabled { opacity: .5; cursor: default; }
+/* 平台切换器用通用的 .sub-tabs / .sub-tab（定义见文件末尾），这里不再单独定一份。 */
 
 .channels .channel-card {
   max-width: 720px; margin-top: 16px; padding: 20px;
@@ -396,3 +387,58 @@ button.ghost.tiny.danger-soft { color: #d4382d; }
 .identity .id-saved { font-size: 12px; color: #1f6b39; }
 .identity .state-block { padding: 24px 16px; }
 .identity .footnote { font-size: 12px; color: #8a9199; margin-top: 16px; line-height: 1.7; }
+
+/* ── 通用次级导航（比顶部 .tabs 轻：描边 + 浅蓝底）────── */
+/* 消息渠道的平台切换、问数的两个子 tab 都用这套，别再各写一份。 */
+.sub-tabs { display: flex; gap: 8px; margin: 14px 0 2px; }
+.sub-tab {
+  padding: 6px 18px; font-size: 14px; cursor: pointer;
+  color: #5b6370; background: #fff;
+  border: 1px solid #d5d9de; border-radius: 999px;
+}
+.sub-tab:hover:not(:disabled) { border-color: #2160f3; color: #2160f3; }
+.sub-tab.active { color: #2160f3; background: #eef3ff; border-color: #b6caff; font-weight: 500; }
+.sub-tab:disabled { opacity: .5; cursor: default; }
+
+/* ── 智能问数页（数据库配置 / MCP 配置）────────────── */
+.dataquery .card {
+  max-width: 760px; margin-top: 16px; padding: 20px;
+  border: 1px solid #e3e6ea; border-radius: 12px; background: #fff;
+}
+.dataquery .card h3 { margin: 0 0 4px; font-size: 15px; color: #1d232b; }
+.dataquery .card h3 .mono { font-size: 13px; }
+
+.dataquery .chip {
+  display: inline-block; margin-left: 6px; padding: 1px 8px;
+  border-radius: 999px; font-size: 11px; border: 1px solid #d5d9de; color: #8a9199;
+}
+.dataquery .chip.on { color: #1f6b39; background: #e7f6ec; border-color: #b5e0c4; }
+.dataquery .chip.off { color: #8a9199; background: #f2f4f7; }
+.dataquery .chip.mark { color: #2160f3; background: #eef3ff; border-color: #b6caff; }
+.dataquery .chip.warn { color: #a4271d; background: #fdecea; border-color: #f3c1bd; }
+
+.dataquery .switch {
+  position: relative; width: 44px; height: 24px; border-radius: 999px;
+  border: 1px solid #d5d9de; background: #eef0f3; cursor: pointer; padding: 0;
+}
+.dataquery .switch .knob {
+  position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+  border-radius: 50%; background: #fff; border: 1px solid #d5d9de;
+  transition: left .15s ease;
+}
+.dataquery .switch.on { background: #2160f3; border-color: #2160f3; }
+.dataquery .switch.on .knob { left: 22px; }
+
+.dataquery .notice { margin: 12px 0; padding: 10px 14px; border-radius: 8px; font-size: 13px; }
+.dataquery .notice.ok { background: #e7f6ec; color: #1f6b39; border: 1px solid #b5e0c4; }
+.dataquery .notice.err { background: #fdecea; color: #a4271d; border: 1px solid #f3c1bd; }
+
+.dataquery .mcp-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.dataquery .mcp-tools { margin: 10px 0 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+.dataquery .mcp-tools li {
+  font-size: 12px; padding: 3px 9px; border-radius: 6px;
+  background: #f2f4f7; border: 1px solid #e3e6ea; color: #3d4450;
+}
+.dataquery .mcp-tools li.danger { background: #fdecea; border-color: #f3c1bd; color: #a4271d; font-weight: 600; }
+
+.dataquery .footnote { font-size: 12px; color: #8a9199; margin-top: 12px; line-height: 1.7; }

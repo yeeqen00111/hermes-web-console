@@ -3,6 +3,7 @@ import Chat from "./Chat.jsx";
 import ModelConfigs from "./ModelConfigs.jsx";
 import Channels from "./Channels.jsx";
 import Identity from "./Identity.jsx";
+import DataQuery from "./DataQuery.jsx";
 
 export default function App() {
   const [view, setView] = useState("chat");
@@ -22,6 +23,9 @@ export default function App() {
         <button className={view === "identity" ? "tab active" : "tab"} aria-pressed={view === "identity"} onClick={() => setView("identity")}>
           身份配置
         </button>
+        <button className={view === "dataquery" ? "tab active" : "tab"} aria-pressed={view === "dataquery"} onClick={() => setView("dataquery")}>
+          问数
+        </button>
       </nav>
       <div id="chat-view" className="chat-view" hidden={view !== "chat"}>
         <Chat active={view === "chat"} />
@@ -29,6 +33,7 @@ export default function App() {
       {view === "models" && <ModelConfigs />}
       {view === "channels" && <Channels />}
       {view === "identity" && <Identity />}
+      {view === "dataquery" && <DataQuery />}
     </div>
   );
 }
