@@ -1,0 +1,125 @@
+# ② Hermes Agent + Web Console + hermes-mcp —— **全套一体，全部本地构建**（2026-10-12）
+#
+#   docker compose -f docker-compose.with-hermes.yml up -d --build
+#   Web Console: http://<host>:${PORT:-8000}    Hermes dashboard: http://<host>:9119
+#
+# ⚠️ 这台机器上 Hermes 如果已经在跑（容器名 hermes），本文件会**重建它**：
+#    生成中的会话会中断、飞书等渠道断线十几秒。
+#
+# 与旧版 docker-compose.with-hermes.yml 的区别：
+#   - 三服务走 bridge 网络（不再 network_mode: host），互相用服务名访问；
+#   - 控制台连 dashboard 用 http://gateway:9119；
+#   - 新增 hermes-mcp 服务，页面上要注册的地址是 http://hermes-mcp:9123/mcp。
+
+services:
+  gateway:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes
+    restart: unless-stopped
+    ports:
+      - "9119:9119"                      # dashboard；不想对外可删这两行
+    volumes:
+      - ~/.hermes:/opt/data
+      # ⚠️ 下面三条是服务器（Linux）上才有的宿主目录。Windows/Docker Desktop 上
+      #    它们不存在，Docker 会在宿主上**默默建出空目录**、还可能把镜像里原有内容遮住。
+      #    不是那套环境的就别开。
+      # - /opt/agentops/log:/opt/agentops/log
+      # - /opt/agentops/gitrepo:/opt/agentops/gitrepo
+      # - /opt/agentops/nacos:/opt/agentops/nacos
+    environment:
+      # ── Web Dashboard（同容器 s6 服务）──────────────────────────────
+      # 非回环绑定强制鉴权门，必须配 BASIC_AUTH，否则 dashboard 启动 fail closed。
+      - HERMES_DASHBOARD=1
+      - HERMES_DASHBOARD_HOST=0.0.0.0
+      - HERMES_DASHBOARD_PORT=9119
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_USER:-admin}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_PASS:?必须在 .env 里设置 HERMES_PASS}
+      # ────────────────────────────────────────────────────────────────
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      # OpenAI 兼容 API server（8642）。**默认关**：前端永不直连它，开了还多一个暴露面。
+      # 要开：在 .env 里设 API_SERVER_KEY=<key>，并把下面这些行取消注释。
+      # - API_SERVER_HOST=0.0.0.0
+      # - API_SERVER_ENABLED=true
+      # - API_SERVER_KEY=${API_SERVER_KEY:?要开 API server 就得在 .env 里设 API_SERVER_KEY}
+    command: ["gateway", "run"]
+    networks: [agentnet]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/hermes/.venv/bin/python -c \"from gateway.control_socket import identify_gateway as f; exit(0 if f('/opt/data') else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  console:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: hermes-web-console:local
+    container_name: hermes-web-console
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    # 共用配置整份来自 .env（Docker 原生机制）；下面只留结构性覆盖
+    env_file:
+      - .env
+    environment:
+      # bridge 网络下用服务名访问 dashboard（不是 127.0.0.1）——
+      # 这一条覆盖 .env 里的同名值，两份 stack 因此可以各用各的 .env/.env.mcp。
+      HERMES_BASE: "http://gateway:9119"
+      HIDDEN_DB_PATH: /data/hidden_models.db
+      HERMESMCP_DB_CONFIG: /shared/db_connections.db
+    volumes:
+      - console-data:/data
+      - ./shared/sqlite:/shared
+    networks: [agentnet]
+
+  # ── 问数 MCP 服务 ────────────────────────────────────────────────────
+  # 它是 HTTP(streamable) 型 MCP 服务：Hermes 通过 URL 连它，端点固定为
+  #     http://<service_name>:9123/mcp      ← service 名 = hermes-mcp
+  # 所以「Hermes 上注册 MCP 时填什么」的答案是：
+  #     名称：sql-coustm（或任意名字，与 .env 的 MCP_SERVER_NAME 一致即可）
+  #     地址：http://hermes-mcp:9123/mcp
+  #   - 不能用 localhost/127.0.0.1：那是 Hermes 容器自己，里面没有 mcp 进程
+  #   - 不能用宿主 IP：mcp 在 bridge 网络里、没往宿主映射端口
+  #   - 同一 network 内 Docker DNS 认 **service 名**（就是下面这个 hermes-mcp）
+  # 该 URL 有个现实参照：你既有的 metaso 条目就是同一形态（url: https://metaso.cn/api/mcp）
+  hermes-mcp:
+    build:
+      context: ../hermes-mcp
+      dockerfile: Dockerfile
+    image: hermes-mcp:local
+    container_name: hermes-mcp
+    restart: unless-stopped
+    environment:
+      # 同 mcp 那份：容器跑的是 scripts/run_http.py，
+      # MCP_TRANSPORT 只对 `python -m hermes_mcp.server`（stdio）那条路有意义，这里不设。
+      HERMESMCP_HOST: 0.0.0.0
+      HERMESMCP_PORT: "9123"
+      # Host 白名单是**前缀匹配**，且请求头带端口 → 必须写 `服务名:*`
+      HERMESMCP_ALLOWED_HOSTS: "hermes-mcp:*,localhost:*,127.0.0.1:*"
+      HERMESMCP_DB_CONFIG: /shared/db_connections.db
+      HERMESMCP_DB_KEY: ${HERMESMCP_DB_KEY:?必须在 .env 里设置 HERMESMCP_DB_KEY（两侧必须一致）}
+      HERMESMCP_LLM_BASE_URL: ${HERMESMCP_LLM_BASE_URL:-}
+      HERMESMCP_LLM_API_KEY: ${HERMESMCP_LLM_API_KEY:-}
+      HERMESMCP_LLM_MODEL: ${HERMESMCP_LLM_MODEL:-}
+    volumes:
+      - ./shared/sqlite:/shared
+    networks: [agentnet]
+    healthcheck:
+      # 用 socket 连一次端口（slim 镜像里没有 curl；探 /mcp 需要 MCP 握手头）
+      test: ["CMD-SHELL", "python -c \"import socket,sys; s=socket.socket(); s.settimeout(3); sys.exit(0 if s.connect_ex(('127.0.0.1',9123))==0 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  console-data:
+
+networks:
+  agentnet:
+    name: agentnet

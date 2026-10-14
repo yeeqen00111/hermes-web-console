@@ -1,0 +1,20 @@
+# hermes-mcp 依赖清单
+# Python 3.10+；在 conda 环境 hermes-mcp 中安装：pip install -r requirements.txt
+
+# ---- M0 基础集 ----
+mcp>=1.0
+SQLAlchemy>=2.0
+sqlparse
+PyYAML
+pydantic>=2
+cryptography
+httpx
+
+# ---- 测试 ----
+pytest
+
+# ---- DB 方言驱动（M1 接真库时再启用）----
+# pymysql            # MySQL
+# psycopg[binary]    # PostgreSQL
+# pyodbc             # SQL Server（需本机 MS ODBC Driver）
+# oracledb           # Oracle

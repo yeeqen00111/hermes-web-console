@@ -1,0 +1,22 @@
+# secrets / local config
+.env
+*.pem
+config*.yaml
+!config.example.yaml
+
+# generated local data & SQLite registries
+db_connections.db
+data/*.db
+
+# python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/
+
+# tooling
+.idea/
+.vscode/
+.pytest_cache/

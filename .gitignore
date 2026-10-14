@@ -1,5 +1,9 @@
 # ── 环境与凭据（绝不提交）──
+# `.env` 只挡同名文件；`.env.mcp` 这类变体要用通配。
+# 例外：`.env.example` 是模板（值全空），必须能提交。
 .env
+.env.*
+!.env.example
 .env.local
 
 # ── 本地记忆 / AI 配置（含服务器信息，仅本机使用）──
@@ -32,3 +36,6 @@ dist/
 .idea/
 .vscode/
 hidden_models.db
+
+# ── hermes-deploy：共享注册表目录（含密码密文）不进仓库 ──
+hermes-deploy/shared/

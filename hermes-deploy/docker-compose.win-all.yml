@@ -1,0 +1,144 @@
+# ③ 全套（Hermes Agent + Web Console + hermes-mcp）—— **Windows / Docker Desktop 专用**
+#    **所有持久化数据都落在 D:\WSL\docker\Volumes\<业务>\ 下面**（一个业务一个文件夹）
+#
+#   1) 同目录放好 .env（照 .env.example 填）
+#   2) 若有旧容器在跑，先停：docker stop hermes hermes-web-console
+#   3) 确认宿主 8000 空着（本机开发后端会占它）
+#   4) docker compose -f docker-compose.win-all.yml up -d --build
+#   5) Web Console: http://localhost:8000    Hermes dashboard: http://localhost:9119
+#
+# 与 Linux 那份（docker-compose.with-hermes.yml）的差别：
+#   ① 不用 `network_mode: host` —— Docker Desktop 上 host 指 WSL2 的虚拟机，
+#      8000/9119 都不转发到 Windows；这里一律 bridge + ports。
+#   ② 宿主路径写 Windows 形式，并且全部收在下面的 &volroot 里——换根目录只改一行。
+#   ③ 不挂 /opt/agentops/* —— 服务器上才有的目录，Windows 上没有。
+#
+# 数据落位（一个业务一个文件夹）：
+#   D:\WSL\docker\Volumes\hermes-agent-data\   ← Hermes 家目录（配置/会话/密钥）
+#   D:\WSL\docker\Volumes\hermes-console\      ← 控制台自己的库（模型配置/隐藏清单）
+#   D:\WSL\docker\Volumes\hermes-shared\       ← 控制台与 mcp 共享的数据库注册表
+#
+# ⚠️ 四点提醒：
+#   1. 用 bind 挂载后，`docker volume ls` 里**看不到**它们（bind 不是 docker 卷）；
+#      以前那些命名卷（hermes-agent-data / hermes-dashboard-api-demo_console-data）
+#      会变成孤儿，确认数据迁完再 `docker volume rm` 清掉。
+#   2. **旧数据要手工搬过去**：现在跑着的 hermes 容器挂的是 C:\Users\<你的用户名>\.hermes，
+#      本文件改挂 D:\WSL\docker\Volumes\hermes-agent-data —— 不搬就是一套全新的 Hermes。
+#      不想搬：把下面 gateway 那行的 *volroot/hermes-agent-data 换回 ~/.hermes。
+#   3. 共享注册表是 SQLite，跨 Windows 文件系统（9p/gRPC-FUSE）通常没问题；
+#      万一报 database is locked，就把 *volroot/hermes-shared 换回命名卷。
+#   4. 源路径直接写在本文件里（不用 ${} 插值）：Windows 反斜杠会被 compose 的
+#      变量插值吃掉，交给 YAML 处理最稳。
+
+services:
+  gateway:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes
+    restart: unless-stopped
+    ports:
+      - "9119:9119"                      # dashboard（不想对外可删这行）
+    volumes:
+      - type: bind
+        source: D:/WSL/docker/Volumes/hermes-agent-data
+        target: /opt/data
+      # 下面三条是 Linux 服务器才有的目录，Windows 上不要挂（会建出空目录还遮住镜像内容）：
+      # - type: bind
+      #   source: /opt/agentops/log
+      #   target: /opt/agentops/log
+    environment:
+      # ── Web Dashboard（同容器 s6 服务）──────────────────────────────
+      # 非回环绑定强制鉴权门，必须配 BASIC_AUTH，否则 dashboard 启动 fail closed。
+      - HERMES_DASHBOARD=1
+      - HERMES_DASHBOARD_HOST=0.0.0.0
+      - HERMES_DASHBOARD_PORT=9119
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_USER:-admin}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_PASS:?必须在 .env 里设置 HERMES_PASS}
+      # ────────────────────────────────────────────────────────────────
+      # Docker Desktop 上 UID/GID 由文件共享层处理，这两个值基本不起作用；留着无害。
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      # OpenAI 兼容 API server（8642）。默认关：前端永不直连它。
+      # 要开：在 .env 里设 API_SERVER_KEY，再把下面三行取消注释。
+      # - API_SERVER_HOST=0.0.0.0
+      # - API_SERVER_ENABLED=true
+      # - API_SERVER_KEY=${API_SERVER_KEY:?要开 API server 就得设 API_SERVER_KEY}
+    command: ["gateway", "run"]
+    networks: [agentnet]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/hermes/.venv/bin/python -c \"from gateway.control_socket import identify_gateway as f; exit(0 if f('/opt/data') else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  console:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: hermes-web-console:local
+    container_name: hermes-web-console
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    # 共用配置整份来自 .env（Docker 原生机制）；下面只留结构性覆盖
+    env_file:
+      - .env
+    environment:
+      # bridge 网络下用 **服务名** 访问 dashboard；不能用 127.0.0.1
+      # （Docker Desktop 上容器里的 127.0.0.1 是容器自己，不是宿主）。
+      HERMES_BASE: "http://gateway:9119"
+      HIDDEN_DB_PATH: /data/hidden_models.db
+      HERMESMCP_DB_CONFIG: /shared/db_connections.db
+    volumes:
+      - type: bind
+        source: D:/WSL/docker/Volumes/hermes-console
+        target: /data
+      - type: bind
+        source: D:/WSL/docker/Volumes/hermes-shared
+        target: /shared
+    networks: [agentnet]
+
+  # ── 问数 MCP 服务（HTTP/streamable）──────────────────────────────────
+  # 在 Hermes 上注册时填：
+  #     名称：sql-coustm        地址：http://hermes-mcp:9123/mcp
+  # host 是 **service 名**（同一 network 内 Docker DNS 解析）；
+  # 不能用 localhost（那是 Hermes 容器自己），也不能用宿主 IP（没往宿主映射端口）。
+  hermes-mcp:
+    build:
+      context: ../hermes-mcp
+      dockerfile: Dockerfile
+    image: hermes-mcp:local
+    container_name: hermes-mcp
+    restart: unless-stopped
+    environment:
+      # 容器跑的是 scripts/run_http.py：只认 HOST/PORT/ALLOWED_HOSTS，
+      # MCP_TRANSPORT 是给 stdio 那条路用的，这里不设。
+      HERMESMCP_HOST: 0.0.0.0
+      HERMESMCP_PORT: "9123"
+      # Host 白名单是**前缀匹配**且请求头带端口 → 必须写 `服务名:*`
+      HERMESMCP_ALLOWED_HOSTS: "hermes-mcp:*,localhost:*,127.0.0.1:*"
+      HERMESMCP_DB_CONFIG: /shared/db_connections.db
+      HERMESMCP_DB_KEY: ${HERMESMCP_DB_KEY:?必须在 .env 里设置 HERMESMCP_DB_KEY（两侧必须一致）}
+      HERMESMCP_LLM_BASE_URL: ${HERMESMCP_LLM_BASE_URL:-}
+      HERMESMCP_LLM_API_KEY: ${HERMESMCP_LLM_API_KEY:-}
+      HERMESMCP_LLM_MODEL: ${HERMESMCP_LLM_MODEL:-}
+    volumes:
+      - type: bind
+        source: D:/WSL/docker/Volumes/hermes-shared
+        target: /shared
+    networks: [agentnet]
+    healthcheck:
+      # 用 socket 连一次端口：python:3.10-slim 里没有 curl，
+      # 探 /mcp 又需要 MCP 握手头，不如直接确认进程在监听。
+      test: ["CMD-SHELL", "python -c \"import socket,sys; s=socket.socket(); s.settimeout(3); sys.exit(0 if s.connect_ex(('127.0.0.1',9123))==0 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  agentnet:
+    name: agentnet

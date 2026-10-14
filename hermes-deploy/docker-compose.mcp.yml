@@ -1,0 +1,84 @@
+# ① Web Console + hermes-mcp —— **都用本地源码构建**（2026-10-12）
+#
+#   docker compose -f docker-compose.mcp.yml up -d --build
+#   Web Console: http://<host>:${PORT:-8000}
+#
+# 这个组合里**没有 Hermes**：控制台照常能开，但「模型配置 / 消息渠道 / 身份配置」这些
+# 走 dashboard 的 tab 会连不上（返回 502 + 人话文案，不崩）。要调「问数」本身够用了。
+#
+# 全套（含 Hermes）见 docker-compose.with-hermes.yml。
+#
+# 网络：bridge + 服务名互访（不用 host 模式，Windows 上 host 行为受限）。
+# 共享 SQLite：两边挂同一个宿主机目录 ./shared/sqlite，指向同一个文件——
+#   这是控制台与 mcp 之间**唯一**的协作方式（没有网络调用）。
+
+services:
+  console:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: hermes-web-console:local
+    container_name: hermes-web-console
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    # 环境变量直接来自 .env.mcp（Docker 原生机制）：容器里就是 os.environ，
+    # 与「compose 自己的 ${} 插值」互不干扰 —— 两份 stack 用不同文件，值不会串。
+    env_file:
+      - .env.mcp
+    environment:
+      # 下面几条是**结构性**的（跟编排走的，不适合放进 .env）：
+      HIDDEN_DB_PATH: /data/hidden_models.db
+      HERMESMCP_DB_CONFIG: /shared/db_connections.db
+    volumes:
+      - console-data:/data
+      - ./shared/sqlite:/shared
+    networks: [agentnet]
+
+  # ── 问数 MCP 服务（HTTP/streamable，端点固定 /mcp）────────────────────
+  # 这份 stack 里**没有 Hermes**，所以此时谈不上「注册」；地址留着，
+  # 等接上 Hermes（或换成 with-hermes 那份）时按下面填：
+  #     名称：sql-coustm      地址：http://hermes-mcp:9123/mcp
+  hermes-mcp:
+    build:
+      context: ../hermes-mcp
+      dockerfile: Dockerfile
+    image: hermes-mcp:local
+    container_name: hermes-mcp
+    restart: unless-stopped
+    # 要对宿主机直接调试/curl 时把下面两行打开；生产没必要暴露
+    # ports:
+    #   - "9123:9123"
+    environment:
+      # 注意：这里**不设 MCP_TRANSPORT** —— 容器跑的是 scripts/run_http.py，
+      # 它只认 HOST/PORT/ALLOWED_HOSTS 三个变量，MCP_TRANSPORT 是给
+      # `python -m hermes_mcp.server`（stdio）那条路用的，设了也没人读。
+      HERMESMCP_HOST: 0.0.0.0
+      HERMESMCP_PORT: "9123"
+      # Host 白名单是**前缀匹配**，且请求头带端口 → 必须写 `服务名:*`
+      HERMESMCP_ALLOWED_HOSTS: "hermes-mcp:*,localhost:*,127.0.0.1:*"
+      # 共享注册表（与控制台同一个文件）
+      HERMESMCP_DB_CONFIG: /shared/db_connections.db
+      HERMESMCP_DB_KEY: ${HERMESMCP_DB_KEY:?必须在 .env 里设置 HERMESMCP_DB_KEY（两侧必须一致）}
+      # NL→SQL 生成模型（不配的话只有 ask 不能用，query 等工具照常）
+      HERMESMCP_LLM_BASE_URL: ${HERMESMCP_LLM_BASE_URL:-}
+      HERMESMCP_LLM_API_KEY: ${HERMESMCP_LLM_API_KEY:-}
+      HERMESMCP_LLM_MODEL: ${HERMESMCP_LLM_MODEL:-}
+    volumes:
+      - ./shared/sqlite:/shared
+    networks: [agentnet]
+    healthcheck:
+      # 用 socket 连一次端口：python:3.10-slim 里**没有 curl**，
+      # 探 /mcp 又需要 MCP 握手头，不如直接确认进程在监听。
+      test: ["CMD-SHELL", "python -c \"import socket,sys; s=socket.socket(); s.settimeout(3); sys.exit(0 if s.connect_ex(('127.0.0.1',9123))==0 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  console-data:
+
+networks:
+  agentnet:
+    name: agentnet

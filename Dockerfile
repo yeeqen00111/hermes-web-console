@@ -17,7 +17,10 @@ RUN npm run build
 FROM python:3.10-slim
 WORKDIR /app/backend
 COPY backend/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# 依赖源：国内构建机直连 pypi.org 很慢甚至超时，默认走清华镜像（全量 PyPI 镜像）。
+# 要换回官方源：构建时传 --build-arg PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+RUN pip install --no-cache-dir --index-url="$PIP_INDEX_URL" -r requirements.txt
 COPY backend/ ./
 # backend/main.py 找的是「backend 的父目录下 static/」→ 即 /app/static
 COPY --from=web /build/dist /app/static

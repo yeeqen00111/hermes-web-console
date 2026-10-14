@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-mcp"
+version = "0.1.0"
+description = "Read-only multi-database MCP server for Hermes intelligent data Q&A (Ask-your-data)"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0",
+    "SQLAlchemy>=2.0",
+    "sqlparse",
+    "PyYAML",
+    "pydantic>=2",
+    "cryptography",
+    "httpx",
+]
+
+[project.optional-dependencies]
+mysql = ["pymysql"]
+postgresql = ["psycopg[binary]"]
+sqlserver = ["pyodbc"]
+oracle = ["oracledb"]
+test = ["pytest"]
+
+[project.scripts]
+hermes-mcp = "hermes_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

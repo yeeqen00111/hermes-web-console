@@ -1,0 +1,27 @@
+# 构建上下文排除 —— 镜像会被推到仓库，别把秘密和本地数据打进去。
+# 注意：compose 用 build.context: ../hermes-mcp，用的是**这个**文件，不是仓库根那份。
+
+# secrets / local config
+.env
+*.pem
+config*.yaml
+
+# 本地数据：注册表与样例库都不进镜像（运行时由卷挂进来）
+db_connections.db
+db_connections.db-wal
+db_connections.db-shm
+data/*.db
+
+# 测试与工具产物
+tests/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# IDE / 文档（文档是给仓库看的，不必进运行镜像）
+.idea/
+.vscode/
+docs/
