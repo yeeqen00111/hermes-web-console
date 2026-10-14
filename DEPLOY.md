@@ -1,10 +1,12 @@
 # Hermes Web Console — 部署文档
 
-> 版本：v0.3.x ｜ 单镜像 = 前端静态产物 + FastAPI 后端。所有凭据运行时经环境变量注入，**镜像内零秘密**。
+> 版本：v0.5 ｜ 单镜像 = 前端静态产物 + FastAPI 后端。所有凭据运行时经环境变量注入，**镜像内零秘密**。
+>
+> **给 Hermes 提交代码修改是禁止的**——本文所有操作只发生在控制台仓库与编排层。
 
 ## 1. 部署形态一览
 
-仓库根目录有三个 compose 文件，对应三种场景，**按需选一个**：
+仓库根目录有三份 compose（**拉已发布镜像 / 建镜像**那套）；`hermes-deploy/` 目录下另有三份（**带智能问数、全部本地构建**，见 §10）：
 
 | 文件 | 场景 | 说明 |
 |---|---|---|
@@ -100,4 +102,81 @@ python -m uvicorn main:app --reload --port 8000
 npm install && npm run dev        # http://localhost:5173，/api 代理到 8000
 ```
 
-依赖：后端 `fastapi uvicorn requests websockets PyYAML`；前端 `npm install`。细节见 `README.md` 与 `API.md`。
+依赖：后端 `fastapi uvicorn requests websockets PyYAML cryptography`（见 `backend/requirements.txt`）；前端 `npm install`。细节见 `README.md` 与 `API.md`。
+
+---
+
+## 10. 场景 D：带智能问数（`hermes-deploy/`，全部本地构建）
+
+> v0.5 新增。控制台 + hermes-mcp（问数 MCP 服务）一起部署，**镜像全部从本仓库源码构建**（不依赖 ghcr）。
+> 三份 compose 按需选一个，都在 `hermes-deploy/` 目录下：
+
+| 文件 | 起什么 | 适用 |
+|---|---|---|
+| `docker-compose.mcp.yml` | `console` + `hermes-mcp`（**不含 Hermes**） | 只调「问数」：控制台能开，其他 tab 连不上 dashboard 是预期 |
+| `docker-compose.with-hermes.yml` | `gateway` + `console` + `hermes-mcp` | Linux / 服务器一体部署（bridge 网络，非 host） |
+| `docker-compose.win-all.yml` | 同上，**Windows / Docker Desktop 专用** | bridge + ports；数据落 `D:\WSL\docker\Volumes\`；不挂 `/opt/agentops` |
+
+### 10.1 启动
+
+```bash
+cd hermes-deploy
+# 先让位（旧容器占 9119 / 8000；宿主 8000 若被本机开发后端占用也要让开）
+docker stop hermes hermes-web-console 2>/dev/null
+
+# Windows / Docker Desktop：
+docker compose -f docker-compose.win-all.yml up -d --build
+# Linux 服务器：
+docker compose -f docker-compose.with-hermes.yml up -d --build
+# 只调问数（不起 Hermes）：
+docker compose -f docker-compose.mcp.yml up -d --build
+```
+
+首次构建要拉基础镜像 + `npm ci` + `pip install`，**几分钟起**。访问：控制台 `http://localhost:8000`、dashboard `http://localhost:9119`。
+
+### 10.2 两份 env 的分工（`hermes-deploy/`）
+
+| 文件 | 给谁 | `HERMES_BASE` |
+|---|---|---|
+| `.env` | full stack（with-hermes / win-all）的 `env_file` | `http://gateway:9119` |
+| `.env.mcp` | 只有 mcp.yml 的 `env_file` | `http://127.0.0.1:8426`（那份没有 dashboard） |
+
+- 两者模板一致（见 `.env.example`），差异只在 `HERMES_BASE`——**改共享值（密码 / key）时两个文件都要改**。
+- 机制：compose 的 `${...}` 插值读同目录 `.env`；容器里拿到哪些变量由各服务的 `env_file:` 决定。别手动 `--env-file`。
+
+必填键：`HERMES_USER` / `HERMES_PASS`（dashboard basic + 控制台共用一组）、`HERMESMCP_DB_KEY`（共享注册表加密 key，**两侧必须一致**）。生产建议新生成 key，不要沿用开发期那把。
+
+### 10.3 共享 SQLite（控制台 ↔ hermes-mcp 的唯一通道）
+
+```
+console     ──写──▶  /shared/db_connections.db ◀──读──  hermes-mcp
+                （挂同一个宿主目录：Linux 是 ./shared/sqlite；Windows 是 D:\WSL\docker\Volumes\hermes-shared）
+```
+
+- 控制台加密写入、hermes-mcp 解密读出；**没有网络调用**，因此两侧同机同文件是硬条件。
+- 挂**目录**不挂单文件（SQLite 的 `-wal`/`-shm` 要同目录）。
+- 谁先启动谁建表；控制台里「数据库配置」保存的那条，就是问数端要用的。
+
+### 10.4 问数上线四步
+
+1. `up -d --build` 起 stack（见 10.1）。
+2. 打开控制台 → **问数 → MCP 配置 → ＋ 添加 MCP 服务**：名称 `sql-coustm`（与 `.env` 的 `MCP_SERVER_NAME` 一致），地址 **`http://hermes-mcp:9123/mcp`**。
+   - host 必须是 **service 名**——同 network 内 Docker DNS 解析；`localhost` 是 Hermes 容器自己，宿主 IP 也不通（mcp 没往宿主映射端口）。
+3. **问数 → 数据库配置**：填一条数据源（建议先新建库、别沿用开发期那个旧注册表）。
+4. 对话里直接问数。
+
+### 10.5 构建网络（国内环境）
+
+| 环节 | 走哪 | 在哪配置 |
+|---|---|---|
+| 基础镜像（`python:3.10-slim` / `node:24-alpine` / `hermes-agent`） | daocloud 加速 | `~/.docker/daemon.json` 的 `registry-mirrors` |
+| `npm ci` | `registry.npmmirror.com` | `package-lock.json` 里写死的 resolved |
+| `pip install` | 清华源 | 两个 Dockerfile 的 `PIP_INDEX_URL` ARG（`--build-arg` 可换回官方） |
+
+### 10.6 已知坑（都踩过）
+
+- **控制台镜像要装 `cryptography`**：`backend/requirements.txt` 里已列（缺了会让"保存数据源"报 500 `ModuleNotFoundError`）。改依赖后必须 `up -d --build` 重建镜像。
+- **hermes-mcp 的镜像要显式装 `uvicorn`**（`run_http.py` 要它，`pyproject.toml` 没声明）——已在 `hermes-mcp/Dockerfile` 补齐。
+- **`python:3.10-slim` 没有 `curl`**：两个健康检查都用纯 Python socket 探测，别改回 curl。
+- **两个 stack 别同时起**：共用 `console-data` 卷（项目名相同）。一个一个来。
+- **mcp 服务没起 / dashboard 没起时**，"测试"必然失败——那是环境问题不是代码问题。

@@ -1,6 +1,6 @@
 # Hermes Web Console — 前端调用接口文档
 
-> 版本：v0.4 ｜ 本文只列出**前端实际调用**的接口。前端只调本后端 `/api/*`，凭据仅存于后端环境变量。
+> 版本：v0.5 ｜ 本文只列出**前端实际调用**的接口。前端只调本后端 `/api/*`，凭据仅存于后端环境变量。
 
 ## 0. 通用约定
 
@@ -9,10 +9,10 @@
 | 开发基址 | `http://localhost:8000`（前端 dev 用相对路径 `/api/...`，Vite 代理转发） |
 | 生产基址 | 同源部署，前端仍用 `/api/...` |
 | 数据格式 | 除 SSE 外均为 `application/json; charset=utf-8` |
-| 鉴权 | 所有 `/api/*` 都过 `require_app_token`；默认（`APP_AUTH` 未设）放行，无登录页。⚠️ **前端目前不带任何 `Authorization` 头**——`APP_AUTH=1` 是后端能力，前端尚未接（`POST /api/login` 是遗留路由，未启用） |
+| 鉴权 | **前端不带任何 `Authorization` 头**（无登录页）。后端默认放行；`APP_AUTH` / `POST /api/login` 是后端遗留能力，前端未使用，不在本文档范围 |
 | 错误体 | 业务错误统一 `{ "detail": "<文案>" }` |
 
-常见状态码：`400` 参数非法 ｜ `401` 令牌不对（仅 `APP_AUTH=1` 时） ｜ `404` 不存在 ｜ `409` 冲突/忙碌 ｜ `410` 运行态已失效 ｜ `413` 内容过大 ｜ `502` 依赖异常 ｜ `503` 上游 503 原样透传（§2 两条历史接口），或 `APP_AUTH=1` 但后端未配 `HERMES_PASS`。
+常见状态码：`400` 参数非法 ｜ `404` 不存在 ｜ `409` 冲突/忙碌 ｜ `410` 运行态已失效 ｜ `413` 内容过大 ｜ `502` 依赖异常（连不上 Hermes 等） ｜ `503` 上游 503 原样透传（§2 两条历史接口）。
 
 ---
 
@@ -278,3 +278,92 @@ data: {"type":"<事件名>","session_id":"...","stored_session_id":"...","profil
 - `404` 未知名字；`400` / `403` / `502`
 
 **前端约定**：`truncated` 或 `binary` 为真时前端将该文件置为只读、禁用保存。
+
+---
+
+## 6. 智能问数
+
+> 「问数」tab 两个子页。**两条链路完全不同**，别混：
+> - **数据库配置**：控制台只把配置写进**与问数服务共享的 SQLite 文件**——不连数据库、不测连通（所以没有"测试"接口）；真正连库的是 hermes-mcp。
+> - **MCP 配置**：只是**代理 Hermes dashboard** 的 `/api/mcp/*`（问数服务是独立服务、以 URL 注册在 Hermes 上）；控制台不连 hermes-mcp，也拿不到它的凭据。
+
+### 6.1 数据库配置（共享 SQLite）
+
+#### `GET /api/db-connections`
+- `200`：`{ "connections": [...], "count": n }`（**一期恒为 0 或 1 条**；表本身支持多条，这是接口形状，将来放开多库不改契约）
+- 单条字段：
+```json
+{
+  "id": 1, "name": "订单库", "type": "mysql",
+  "host": "10.0.0.5", "port": 3306, "database": "shop", "username": "reporter",
+  "read_only": true, "max_rows": 200,
+  "has_password": true, "status": null, "last_error": null,
+  "created_at": "...", "updated_at": "..."
+}
+```
+- ⚠️ **永不回显密码**（明文、密文都不给），只有 `has_password` 布尔
+- `status` / `last_error` 由**问数服务**写入（它用库的结果），控制台只读展示
+- `502`：后端未配置 `HERMESMCP_DB_KEY`（无法处理密码）
+
+#### `PUT /api/db-connections`
+新增或修改唯一那条（**幂等**：有则改、没有则建）。改名 = 换行（不会出现两条）。
+
+请求体：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `name` | string | 必填。中英文/数字/下划线/连字符，1–64 位 |
+| `type` | string | 必填。`mysql` / `postgresql` / `sqlserver` / `oracle`（**不支持 sqlite**） |
+| `host` | string | 必填。IP 或主机名（不含空白与路径分隔符） |
+| `port` | int? | 缺省按类型补：3306 / 5432 / 1433 / 1521；1–65535 |
+| `database` | string | 必填。库名（Oracle 填服务名） |
+| `username` | string | 必填。请填 SELECT-only 账号 |
+| `max_rows` | int? | 1–1000，默认 200 |
+| `read_only` | bool? | **服务端恒置 true**，传什么都一样 |
+| `password` | string? | **三态**：不发=保持原值；`""`=清除；有值=加密覆盖（首次保存必填） |
+
+- `200`：`{ "ok": true, "connection": { ...同上单条字段... } }`
+- `400` 校验失败（含「首次保存必须填写密码」）；`409` 名称被占用；`502` 未配置 `HERMESMCP_DB_KEY`
+- 密码加密格式与 hermes-mcp **逐字一致**：`Fernet(base64(sha256(HERMESMCP_DB_KEY)))`，写入 `password_cipher` 列——两侧 key 不同则问数端 `InvalidToken`，只能重填
+
+### 6.2 MCP 服务配置（代理 Hermes dashboard）
+
+> ⚠️ 我们的路径是 **`/api/mcp-servers`**（连字符）；上游是 `/api/mcp/servers`。前端与后端同源，照抄上游路径会撞，所以特意改了连字符。
+
+#### `GET /api/mcp-servers`
+- `200`：
+```json
+{
+  "servers": [{
+    "name": "sql-coustm", "transport": "http", "url": "http://hermes-mcp:9123/mcp",
+    "command": null, "args": [], "env": {}, "auth": null, "enabled": true, "tools": null
+  }],
+  "configured_name": "sql-coustm",
+  "configured_found": true
+}
+```
+- `servers` 来自上游摘要（`env` 上游已打码）；`configured_name` 是后端 `MCP_SERVER_NAME`，页面据此标记"问数那条"
+- `502`：连不上 dashboard / dashboard 登录失效 / 上游格式异常
+
+#### `POST /api/mcp-servers`
+新增一条注册（**一期不做鉴权字段**，`auth` 固定发 `"none"`）。
+- 请求体：`{ "name": "sql-coustm", "url": "http://hermes-mcp:9123/mcp" }`
+- 校验：名称 `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`（会被拼进上游 URL 路径）；URL 必须 `http(s)://` 开头、不含空白、≤500 字符
+- `200`：`{ "ok": true, "name": ..., "url": ... }`
+- `400` 校验失败（本地拦，不打上游）；`409` 重名；`502` 连不上 dashboard
+
+#### `DELETE /api/mcp-servers/{name}`
+- `200`：`{ "ok": true, "name": ... }`；`404` 该服务不存在（本地预检，**不打上游写接口**）；`502`
+
+#### `POST /api/mcp-servers/{name}/test`
+让 **Hermes 去连一次**并列出工具（**不是控制台去连**）。
+- `200`：`{ "ok": bool, "tools": [{ "name", "description" }], "error": "...", "prompts": n, "resources": n }`
+- ⚠️ 上游把"连不上"也报成 **HTTP 200 + `ok:false`**——页面看 `ok` 字段，不看状态码
+- `404` 服务不存在
+
+#### `PUT /api/mcp-servers/{name}/enabled`
+- 请求体：`{ "enabled": true }`（**对象，不是裸布尔**——上游模型如此，发裸布尔会被判 422）
+- `200`：上游结果；`404` / `502`
+- 生效时机：**新会话或重连后**，当前对话不受影响
+
+> **没有"改地址"接口**：上游没有修改单条注册的 API，"改地址"只能先删后建、中途失败会留下空档，所以不做——要换地址就在页面上删掉重加。
