@@ -44,21 +44,6 @@ APP_USER = os.environ.get("APP_USER", "admin")
 APP_PASS = os.environ.get("APP_PASS", "secret")
 APP_AUTH = os.environ.get("APP_AUTH", "").strip().lower() in {"1", "true", "yes"}
 
-# ── 智能问数：共享的数据库注册表（与 hermes-mcp 同一个 SQLite 文件）──────────────
-# 两端各自直读直写这个文件，没有网络调用、没有 import 依赖；唯一的约定是
-# 「表结构 + 密码加密格式」，见 backend/dbconn.py 的模块注释。
-# 相对路径按 backend/ 目录解析（不受启动时工作目录影响）。
-# 默认值与 hermes-mcp 的默认路径一致（它未设 HERMESMCP_DB_CONFIG 时就是 <项目根>/db_connections.db）。
-_db_config_raw = os.environ.get("HERMESMCP_DB_CONFIG", "").strip()
-HERMESMCP_DB_PATH = Path(_db_config_raw) if _db_config_raw else (_BACKEND_DIR.parent / "hermes-mcp" / "db_connections.db")
-if not HERMESMCP_DB_PATH.is_absolute():
-    HERMESMCP_DB_PATH = (_BACKEND_DIR / HERMESMCP_DB_PATH).resolve()
-
-# ⚠️ 下面这一项属于「共享 SQLite」旧通道，2026-10-20 起控制台改走 MCP（见 backend/mcp_client.py）。
-# 暂时保留：数据源接口改造完成前还要用它跑旧逻辑，阶段 4 连同 dbconn.py 里的 Fernet 一起删。
-# 存库密码的加密 key，必须与 hermes-mcp 侧完全一致；缺失时不静默降级（拒绝保存密码）。
-HERMESMCP_DB_KEY = os.environ.get("HERMESMCP_DB_KEY", "").strip()
-
 # ── 智能问数：hermes-mcp 的 MCP 端点（控制台访问问数服务的唯一出口）──────────
 # 不再直读共享 SQLite：MCP 是数据的唯一主人，加密与校验只在它那边有一份。
 #   容器内（同一 network）：http://hermes-mcp:9123/mcp
