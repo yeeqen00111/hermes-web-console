@@ -1,81 +1,57 @@
 # -*- coding: utf-8 -*-
-"""
-智能问数 · 数据库配置（2026-10-12 落地）
+"""智能问数 · 数据源配置（2026-10-12 落地；**2026-10-20 起改走 MCP**）
 
 **本模块只管写配置，不连数据库。**
-页面上新增/修改的那条连接，写进与 hermes-mcp 共享的 SQLite 注册表就结束了；
-真正连库的是问数端（hermes-mcp），它是独立服务、通过 HTTP 注册到 Hermes，
-在对话链路里被调用：
 
-    控制台后端 ──写──▶ 共享 SQLite（db_connections.db）◀──读── hermes-mcp
-                                                                  ▲
-    Hermes ──HTTP（mcp_servers.<name>.url）──────────────────────────┘
+    控制台后端 ──MCP(streamable HTTP)──▶ hermes-mcp ──▶ 数据库
 
-所以这里**不测连通、不装任何 DB driver、不碰 status/last_error 两列**——
-那两列留给问数端，本层不写。
-控制台也不连 hermes-mcp、不 import 它：两端只共享文件与格式约定。
+**MCP 是数据的唯一主人**：密码加密、只读校验都在它那边有一份，本层不重复实现。
+旧通道（控制台与 hermes-mcp 共读同一个 SQLite 文件）已废弃——它要求两端**逐字对齐**
+表结构与 Fernet 格式，任何一侧改了另一侧就静默坏掉（症状：密码 `InvalidToken`，只能重填）。
 
-格式约定（错一个字符，问数端就解不开）
-=====================================
-  key  = base64.urlsafe_b64encode( sha256( HERMESMCP_DB_KEY.encode("utf-8") ).digest() )
-  密文 = Fernet(key).encrypt( password.encode("utf-8") )     → 写 password_cipher 列
-  明文 = Fernet(key).decrypt( password_cipher ).decode()
-表结构、列名、默认值与 hermes-mcp 的 store.py `_SCHEMA` **逐字对齐**。
-缺 key 时拒绝保存密码（不落明文、不降级）。
+本层只做 **MCP 不做的三件事**：
+  1. **完整性校验**——MCP 的 `register_connection` 只强求 `name` + `type`，缺字段照样
+     `ok:true`，要等有人用它才炸；而且炸了也**不给原因**（只回一句 `Error executing tool ...`）。
+     所以这里是**唯一能给用户可读报错**的地方。类型规则见 `conn_types.py`。
+  2. **HTTP 语义**——MCP 删不存在的连接返回 `ok:false`（**不是**错误），404 / 409 得我们翻。
+  3. **类型元数据**——MCP 既不校验类型，也没有"列出类型"的工具。
 
-一期 = 一个库
-=============
-表本身支持多条（name UNIQUE），本层也按「数组」返回；只是 UI 一期只管理一条，
-且**改名必须换行**（先删旧行再插新行），否则会留下孤儿行、破坏「只有一条」的前提。
-以后放开多库：加 `{id}` 系列端点与列表页即可，表结构和契约都不用动。
-
-路径里只允许出现标识符占位符，不写死任何值（教训：/api/channels/feishu/restart）。
+路由（路径里只有 `{name}` 占位符，不写死任何值——教训 /api/channels/feishu/restart）：
+    GET    /api/db-connections          列出全部
+    GET    /api/db-connections/types    类型目录（前端表单 + 本层校验共用一份）
+    POST   /api/db-connections          新增（重名 409）
+    PUT    /api/db-connections/{name}   覆盖一条已存在的（不存在 404；**不支持改名**）
+    DELETE /api/db-connections/{name}   删除（不存在 404）
+    PUT    /api/db-connections          ⚠️ 过渡期兼容别名 = upsert，前端切换完即删
 """
 from __future__ import annotations
 
-import base64
-import hashlib
 import re
-import sqlite3
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set, Tuple
 
-from config import HERMESMCP_DB_KEY, HERMESMCP_DB_PATH, require_app_token
+from config import require_app_token
+from conn_types import catalog, get_type
 from fastapi import APIRouter, Depends, HTTPException
+from mcp_client import McpError, call_tool
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/db-connections", tags=["db-connections"])
 
-# 类型白名单**只用于校验**（决定页面上填什么、库里记什么），本层不据此连库，故不需要 driver。
-# 刻意不含 sqlite：注册表里指向本地文件等于把服务器文件系统交给对话，生产不开放。
-TYPES = ("mysql", "postgresql", "sqlserver", "oracle")
-DEFAULT_PORTS = {"mysql": 3306, "postgresql": 5432, "sqlserver": 1433, "oracle": 1521}
 MAX_ROWS_HARD_CAP = 1000
 DEFAULT_MAX_ROWS = 200
 
-# 表结构与 hermes-mcp store.py 的 _SCHEMA 对齐（IF NOT EXISTS：谁先跑谁建）
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS db_connections (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT NOT NULL UNIQUE,
-    type            TEXT NOT NULL,
-    host            TEXT,
-    port            INTEGER,
-    database        TEXT,
-    username        TEXT,
-    password_cipher TEXT,
-    read_only       INTEGER NOT NULL DEFAULT 1,
-    max_rows        INTEGER,
-    status          TEXT,
-    last_error      TEXT,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
-);
-"""
+_NAME_RE = re.compile(r"^[A-Za-z0-9_一-龥-]{1,64}$")
+_HOST_RE = re.compile(r"^[^\s/\\]{1,255}$")      # 主机名或 IP：不许空白、不许路径分隔符
 
 
 class ConnectionForm(BaseModel):
-    """新增/编辑表单。**id 不由前端提交**：一期就一条记录，PUT 幂等（有则改、没有则建）。"""
+    """新增/编辑表单。
+
+    - `name`：`POST` 必填；`PUT /{name}` 忽略它（身份在路径里）
+    - `read_only`：**服务端恒置 true**，传什么都一样（本层不提供改写开关）
+    - `password` **三态**（与模型配置的 api_key 一致，**与 Hermes 渠道的 env 语义不同**）：
+      不发该字段 = 保持原值 ｜ `""` = 清除 ｜ 非空 = 换新（由 MCP 加密入库）
+    """
     name: str = ""
     type: str = ""
     host: str = ""
@@ -84,100 +60,51 @@ class ConnectionForm(BaseModel):
     username: str = ""
     read_only: bool = True
     max_rows: Optional[int] = None
-    # 密码三态（与模型配置的 api_key 一致，**与 Hermes 渠道的 env 语义不同**）：
-    #   不发该字段 = 保持原值 ｜ "" = 清除 ｜ 非空 = 换新（加密入库）
     password: Optional[str] = None
 
 
-# ── 加解密（格式契约见模块注释；与 hermes-mcp store.py 逐字一致）──
+# ── 参数校验（MCP 不做的那部分）──
 
-def _fernet():
-    if not HERMESMCP_DB_KEY:
-        raise HTTPException(status_code=502, detail="后端未配置 HERMESMCP_DB_KEY，无法处理数据库密码")
-    from cryptography.fernet import Fernet
-    key = base64.urlsafe_b64encode(hashlib.sha256(HERMESMCP_DB_KEY.encode("utf-8")).digest())
-    return Fernet(key)
-
-
-def _encrypt(password: str) -> str:
-    return _fernet().encrypt(password.encode("utf-8")).decode()
-
-
-# ── 存储 ──
-
-def _open():
-    """打开共享库。**必须显式 close**：`with sqlite3.connect(...)` 只管事务不管关闭，
-    句柄不释放的话 Windows 上文件会一直被占（测试里删临时目录会 PermissionError）。"""
-    path = Path(HERMESMCP_DB_PATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=10, isolation_level=None)   # autocommit，事务显式开
-    conn.row_factory = sqlite3.Row
-    conn.executescript(_SCHEMA)
-    return conn
-
-
-class _Conn:
-    """with 用法：正常/异常都 close（sqlite 的 with 只回滚事务，不关文件）。"""
-
-    def __enter__(self) -> sqlite3.Connection:
-        self.conn = _open()
-        return self.conn
-
-    def __exit__(self, *exc) -> bool:
-        self.conn.close()
-        return False
-
-
-def _row_out(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
-    """对外形状：**永不回显密码**，只给 has_password。
-    status / last_error 一并返回只为展示（由问数端写），本层不改它们。"""
-    if row is None:
-        return None
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "type": row["type"],
-        "host": row["host"] or "",
-        "port": row["port"],
-        "database": row["database"] or "",
-        "username": row["username"] or "",
-        "read_only": bool(row["read_only"]),
-        "max_rows": row["max_rows"] or DEFAULT_MAX_ROWS,
-        "has_password": bool(row["password_cipher"]),
-        "status": row["status"],
-        "last_error": row["last_error"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
-
-
-def _sole(conn: sqlite3.Connection) -> Optional[sqlite3.Row]:
-    """一期只有一条记录：取 id 最小的那条（表本身允许多条，将来放开不用改契约）。"""
-    return conn.execute("SELECT * FROM db_connections ORDER BY id LIMIT 1").fetchone()
-
-
-def _cipher_of(conn: sqlite3.Connection, row_id: int) -> str:
-    row = conn.execute("SELECT password_cipher FROM db_connections WHERE id=?", (row_id,)).fetchone()
-    return (row["password_cipher"] or "") if row else ""
-
-
-# ── 参数校验 ──
-
-_NAME_RE = re.compile(r"^[A-Za-z0-9_一-龥-]{1,64}$")
-_HOST_RE = re.compile(r"^[^\s/\\]{1,255}$")      # 主机名或 IP：不许空白、不许路径分隔符
-
-
-def _clean(form: ConnectionForm) -> Dict[str, Any]:
-    """校验并归一化。错误只在本地判定，不泄露任何已存值。"""
-    name = (form.name or "").strip()
+def _clean_name(raw: str) -> str:
+    name = (raw or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="名称不能为空")
     if not _NAME_RE.match(name):
         raise HTTPException(status_code=400, detail="名称只能用中英文、数字、下划线、连字符（1–64 位）")
+    return name
 
+
+def _clean(form: ConnectionForm) -> Tuple[Dict[str, Any], str]:
+    """按类型校验并归一化，返回 `(字段, 类型分组)`。
+
+    **类型决定要填哪些字段**——这是 MCP 完全不管的部分：
+      关系库 → host / port / database / username 都要
+      sqlite → **只要 database（文件路径）**，host/port/username 一律清空
+    """
     kind = (form.type or "").strip().lower()
-    if kind not in TYPES:
-        raise HTTPException(status_code=400, detail=f"不支持的数据库类型：{kind or '(空)'}（可用：{'、'.join(TYPES)}）")
+    meta = get_type(kind)
+    if meta is None:
+        available = "、".join(t["label"] for t in catalog()["types"])
+        raise HTTPException(status_code=400,
+                            detail=f"不支持的数据源类型：{kind or '(空)'}（可用：{available}）")
+
+    database = (form.database or "").strip()
+    if not database:
+        what = "文件路径" if meta["group"] == "file" else "库名（Oracle 填服务名）"
+        raise HTTPException(status_code=400, detail=f"{what}不能为空")
+
+    max_rows = form.max_rows if form.max_rows is not None else DEFAULT_MAX_ROWS
+    if not isinstance(max_rows, int) or not (1 <= max_rows <= MAX_ROWS_HARD_CAP):
+        raise HTTPException(status_code=400, detail=f"行数上限需在 1–{MAX_ROWS_HARD_CAP} 之间")
+
+    # read_only 恒为 true：本层只写只读配置，不提供改写开关
+    fields: Dict[str, Any] = {"type": kind, "database": database,
+                              "max_rows": max_rows, "read_only": True}
+
+    if meta["group"] == "file":
+        # sqlite：只要路径。显式清空另外三个，免得残留上一次填的值
+        fields.update(host="", port=None, username="")
+        return fields, meta["group"]
 
     host = (form.host or "").strip()
     if not host:
@@ -186,27 +113,66 @@ def _clean(form: ConnectionForm) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="主机名不合法")
 
     # 注意 `is not None`：端口 0 是「没填」，该走默认值，不能原样透传
-    port = form.port if form.port is not None else DEFAULT_PORTS[kind]
+    port = form.port if form.port is not None else meta["default_port"]
     if not isinstance(port, int) or not (1 <= port <= 65535):
         raise HTTPException(status_code=400, detail="端口需在 1–65535 之间")
-
-    database = (form.database or "").strip()
-    if not database:
-        raise HTTPException(status_code=400, detail="库名不能为空（Oracle 填服务名）")
 
     username = (form.username or "").strip()
     if not username:
         raise HTTPException(status_code=400, detail="账号不能为空（请用只有 SELECT 权限的账号）")
 
-    max_rows = form.max_rows if form.max_rows is not None else DEFAULT_MAX_ROWS
-    if not isinstance(max_rows, int) or not (1 <= max_rows <= MAX_ROWS_HARD_CAP):
-        raise HTTPException(status_code=400, detail=f"行数上限需在 1–{MAX_ROWS_HARD_CAP} 之间")
+    fields.update(host=host, port=port, username=username)
+    return fields, meta["group"]
 
+
+# ── MCP 调用 ──
+
+async def _call(tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """调 MCP，把连不上 / 工具报错统一翻成 502。"""
+    try:
+        return await call_tool(tool, args)
+    except McpError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def _existing_names() -> Set[str]:
+    """当前已注册的名字集合——用来自己判 404 / 409（MCP 只会 upsert，不替你拦）。"""
+    data = await _call("list_connections", {})
+    return {c.get("name") for c in (data.get("connections") or []) if c.get("name")}
+
+
+async def _register(name: str, fields: Dict[str, Any], password: Optional[str]) -> None:
+    """写入 MCP。密码**三态照原样映射**（MCP 的语义与我们完全一致）：
+    不发 = 保持 ｜ `""` = 清除 ｜ 有值 = 加密存。"""
+    args: Dict[str, Any] = {"name": name, **fields}
+    if password is not None:
+        args["password"] = password
+    res = await _call("register_connection", args)
+    if not res.get("ok", True):
+        raise HTTPException(status_code=502, detail=f"问数服务未能保存「{name}」")
+
+
+def _conn_out(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """把 MCP 返回的连接记录映射成对外形状。
+
+    - **永不回显密码**：MCP 只给 `has_password` 布尔，照传。
+    - ⚠️ MCP 的 `list_connections` **不返回** `id` / `created_at` / `updated_at`
+      （见其 `describe_connection`），所以这三个字段从对外契约里去掉了。
+    - `status` / `last_error` **原样透传**：MCP 侧目前**恒为 null**（`set_status` 无调用点），
+      这里不加工也不隐藏——将来它接上了，前端加个徽标就能用，后端一行不用改。
+    """
     return {
-        "name": name, "type": kind, "host": host, "port": port,
-        "database": database, "username": username,
-        "read_only": True,                      # 恒为 1：本层只写只读配置，不提供改写开关
-        "max_rows": max_rows,
+        "name": rec.get("name") or "",
+        "type": rec.get("type") or "",
+        "host": rec.get("host") or "",
+        "port": rec.get("port"),
+        "database": rec.get("database") or "",
+        "username": rec.get("username") or "",
+        "read_only": bool(rec.get("read_only", True)),
+        "max_rows": rec.get("max_rows") or DEFAULT_MAX_ROWS,
+        "has_password": bool(rec.get("has_password")),
+        "status": rec.get("status"),
+        "last_error": rec.get("last_error"),
     }
 
 
@@ -214,59 +180,64 @@ def _clean(form: ConnectionForm) -> Dict[str, Any]:
 
 @router.get("", dependencies=[Depends(require_app_token)])
 async def list_connections() -> Dict[str, Any]:
-    """一期恒为 0 或 1 条；返回数组形状，将来放开多库不用改契约。"""
-    with _Conn() as conn:
-        rows = conn.execute("SELECT * FROM db_connections ORDER BY id").fetchall()
-    out = [_row_out(r) for r in rows]
+    """列出全部数据源（走 MCP）。"""
+    data = await _call("list_connections", {})
+    out = [_conn_out(c) for c in (data.get("connections") or [])]
     return {"connections": out, "count": len(out)}
 
 
-@router.put("", dependencies=[Depends(require_app_token)])
-async def save_connection(body: ConnectionForm) -> Dict[str, Any]:
-    """新增或修改唯一那条（幂等）。改名会换行——否则「只有一条」的前提会被破坏。"""
-    fields = _clean(body)
+@router.get("/types", dependencies=[Depends(require_app_token)])
+async def list_types() -> Dict[str, Any]:
+    """数据源类型目录：前端拿它渲染表单，本层拿它做校验——**一份事实两处用**。"""
+    return catalog()
 
-    with _Conn() as conn:
-        current = _sole(conn)
-        row_id: Optional[int] = current["id"] if current else None
 
-        if body.password is None:
-            if row_id is None:
-                raise HTTPException(status_code=400, detail="首次保存必须填写密码")
-            cipher = _cipher_of(conn, row_id)      # 不发 = 保持原密文
-        else:
-            cipher = _encrypt(body.password) if body.password else ""   # 空串 = 清除
+@router.post("", dependencies=[Depends(require_app_token)])
+async def create_connection(body: ConnectionForm) -> Dict[str, Any]:
+    """新增一条。**重名 409**——MCP 那边是 upsert，不会替你拦。"""
+    name = _clean_name(body.name)
+    fields, group = _clean(body)
+    if group == "relational" and not body.password:
+        raise HTTPException(status_code=400, detail="首次保存必须填写密码")
+    if name in await _existing_names():
+        raise HTTPException(status_code=409, detail=f"名称「{name}」已存在")
+    await _register(name, fields, body.password)
+    return {"ok": True, "name": name}
 
-        try:
-            if row_id is not None and current["name"] == fields["name"]:
-                conn.execute(
-                    """UPDATE db_connections SET type=?, host=?, port=?, database=?, username=?,
-                       password_cipher=?, read_only=?, max_rows=?, updated_at=datetime('now')
-                       WHERE id=?""",
-                    (fields["type"], fields["host"], fields["port"], fields["database"],
-                     fields["username"], cipher, int(fields["read_only"]), fields["max_rows"], row_id),
-                )
-            else:
-                # 首次新增，或改名：删旧插新必须在一个事务里，失败则整体回滚（不留孤儿行）
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    if row_id is not None:
-                        conn.execute("DELETE FROM db_connections WHERE id=?", (row_id,))
-                    conn.execute(
-                        """INSERT INTO db_connections
-                           (name, type, host, port, database, username, password_cipher, read_only, max_rows)
-                           VALUES (?,?,?,?,?,?,?,?,?)""",
-                        (fields["name"], fields["type"], fields["host"], fields["port"],
-                         fields["database"], fields["username"], cipher,
-                         int(fields["read_only"]), fields["max_rows"]),
-                    )
-                    conn.execute("COMMIT")
-                except Exception:
-                    conn.execute("ROLLBACK")
-                    raise
-        except sqlite3.IntegrityError:
-            raise HTTPException(status_code=409, detail=f"名称「{fields['name']}」已被占用，请换一个")
 
-        saved = _sole(conn)
+@router.put("/{name}", dependencies=[Depends(require_app_token)])
+async def update_connection(name: str, body: ConnectionForm) -> Dict[str, Any]:
+    """覆盖一条**已存在**的（不存在 404）。
 
-    return {"ok": True, "connection": _row_out(saved)}
+    **不支持改名**：MCP 按 name upsert，所谓"改名"实际是删旧的 + 建新的，
+    中途失败会留下空档——和当初拒绝"改 MCP 地址"是同一条理由。要改名就删了重建。
+    """
+    name = _clean_name(name)
+    fields, _ = _clean(body)
+    if name not in await _existing_names():
+        raise HTTPException(status_code=404, detail=f"数据源「{name}」不存在")
+    await _register(name, fields, body.password)
+    return {"ok": True, "name": name}
+
+
+@router.delete("/{name}", dependencies=[Depends(require_app_token)])
+async def delete_connection(name: str) -> Dict[str, Any]:
+    """删除一条。⚠️ MCP 删不存在的返回 `ok:false`（不是错误），404 得我们翻。"""
+    name = _clean_name(name)
+    res = await _call("remove_connection", {"name": name})
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=f"数据源「{name}」不存在")
+    return {"ok": True, "name": name}
+
+
+@router.put("", dependencies=[Depends(require_app_token)], deprecated=True)
+async def upsert_connection_compat(body: ConnectionForm) -> Dict[str, Any]:
+    """⚠️ **过渡期兼容别名**（2026-10-20 加）：语义 = upsert（有则改、没有则建）。
+
+    只为让还没改的前端继续能用；前端切到 `POST` + `PUT /{name}` 之后**连同这个函数一起删**。
+    旧前端不读响应体（只判 `r.ok` 然后重新拉列表），所以返回形状变了也不影响它。
+    """
+    name = _clean_name(body.name)
+    fields, _ = _clean(body)
+    await _register(name, fields, body.password)
+    return {"ok": True, "name": name}
