@@ -62,9 +62,14 @@ app.include_router(channels_router)
 from agentfiles import router as agentfiles_router  # noqa: E402
 app.include_router(agentfiles_router)
 
-# 智能问数 · 数据库配置（共享 SQLite 注册表，与 hermes-mcp 同文件）路由
+# 智能问数 · 数据源（走 hermes-mcp 的 MCP）路由
 from dbconn import router as dbconn_router  # noqa: E402
 app.include_router(dbconn_router)
+
+# 智能问数 · 知识库 + SQL 模板（同样走 MCP）路由
+from assets import knowledge_router, templates_router  # noqa: E402
+app.include_router(knowledge_router)
+app.include_router(templates_router)
 
 # 智能问数 · MCP 服务配置（代理 dashboard 的 /api/mcp/*）路由
 from mcpcfg import router as mcpcfg_router  # noqa: E402
