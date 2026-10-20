@@ -54,8 +54,18 @@ HERMESMCP_DB_PATH = Path(_db_config_raw) if _db_config_raw else (_BACKEND_DIR.pa
 if not HERMESMCP_DB_PATH.is_absolute():
     HERMESMCP_DB_PATH = (_BACKEND_DIR / HERMESMCP_DB_PATH).resolve()
 
+# ⚠️ 下面这一项属于「共享 SQLite」旧通道，2026-10-20 起控制台改走 MCP（见 backend/mcp_client.py）。
+# 暂时保留：数据源接口改造完成前还要用它跑旧逻辑，阶段 4 连同 dbconn.py 里的 Fernet 一起删。
 # 存库密码的加密 key，必须与 hermes-mcp 侧完全一致；缺失时不静默降级（拒绝保存密码）。
 HERMESMCP_DB_KEY = os.environ.get("HERMESMCP_DB_KEY", "").strip()
+
+# ── 智能问数：hermes-mcp 的 MCP 端点（控制台访问问数服务的唯一出口）──────────
+# 不再直读共享 SQLite：MCP 是数据的唯一主人，加密与校验只在它那边有一份。
+#   容器内（同一 network）：http://hermes-mcp:9123/mcp
+#   宿主机开发：MCP 所在机器的地址，如 http://192.168.3.180:9123/mcp
+HERMESMCP_URL = os.environ.get("HERMESMCP_URL", "http://127.0.0.1:9123/mcp").strip()
+# 单次 MCP 调用超时（秒）。配置类操作是低频人工点击，给宽松值即可。
+HERMESMCP_TIMEOUT = float(os.environ.get("HERMESMCP_TIMEOUT", "20") or 20)
 
 # Hermes 上注册的 MCP 服务名（问数那条）。服务名要进代理路径，故做成配置项，不写死在代码里。
 MCP_SERVER_NAME = os.environ.get("MCP_SERVER_NAME", "sql-coustm").strip() or "sql-coustm"
