@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errorText } from "./api.js";
 import DataSources from "./dataquery/DataSources.jsx";
+import Knowledge from "./dataquery/Knowledge.jsx";
+import SqlTemplates from "./dataquery/SqlTemplates.jsx";
 
 // 智能问数页：两个子 tab。
 //   ① 数据源    —— 见 ./dataquery/DataSources.jsx（**2026-10-20 起走后端 MCP**：多库 CRUD。
@@ -271,6 +273,8 @@ function McpServers() {
 
 const TABS = [
   { id: "datasources", label: "数据源", Component: DataSources },
+  { id: "knowledge", label: "知识库", Component: Knowledge },
+  { id: "templates", label: "SQL 模板", Component: SqlTemplates },
   { id: "mcp", label: "MCP 配置", Component: McpServers },
 ];
 

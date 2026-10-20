@@ -474,3 +474,32 @@ button.ghost.tiny.danger-soft { color: #d4382d; }
 /* 数据源表单字段多，弹窗加宽；`.span2` 让某一项跨两列 */
 .modal.wide { width: 560px; }
 .modal-form .span2 { grid-column: 1 / -1; }
+.modal-form textarea {
+  font-size: 14px; padding: 9px 12px; border-radius: 8px;
+  border: 1px solid #d5d9de; font-family: inherit; resize: vertical;
+}
+.modal-form textarea:focus { outline: 2px solid #bfd0ff; border-color: #2160f3; }
+.modal-form textarea.mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+
+/* ── 知识库 / SQL 模板（阶段 5）────────────────────────────── */
+.dataquery .head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dataquery .head-actions select {
+  font-size: 13px; padding: 6px 10px; border-radius: 8px; border: 1px solid #d5d9de; background: #fff;
+}
+.dataquery .ds-clip {
+  max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #5b6370;
+}
+.dataquery .ds-clip.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.dataquery .try-box { display: flex; align-items: center; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
+.dataquery .try-box input {
+  flex: 1 1 280px; font-size: 13px; padding: 8px 12px; border-radius: 8px; border: 1px solid #d5d9de;
+}
+.dataquery .try-box input:focus { outline: 2px solid #bfd0ff; border-color: #2160f3; }
+.dataquery .try-box button {
+  font-size: 13px; padding: 7px 14px; border-radius: 8px;
+  border: 1px solid #d5d9de; background: #fff; cursor: pointer;
+}
+.dataquery .try-result { margin: 4px 0 14px; }
+.dataquery .try-result ul { margin: 0; padding-left: 18px; }
+.dataquery .try-result li { font-size: 13px; line-height: 1.8; color: #3d4450; }
+.dataquery .try-result .chip { margin-left: 6px; }
