@@ -442,3 +442,35 @@ button.ghost.tiny.danger-soft { color: #d4382d; }
 .dataquery .mcp-tools li.danger { background: #fdecea; border-color: #f3c1bd; color: #a4271d; font-weight: 600; }
 
 .dataquery .footnote { font-size: 12px; color: #8a9199; margin-top: 12px; line-height: 1.7; }
+
+/* ── 数据源：表格 + 弹窗（2026-10-20 改造）─────────────────────── */
+.dataquery .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dataquery .card-head button {
+  font-size: 13px; padding: 7px 14px; border-radius: 8px;
+  border: 1px solid #2160f3; background: #2160f3; color: #fff; cursor: pointer;
+}
+.dataquery .card-head button:hover { background: #1b52cc; border-color: #1b52cc; }
+
+.dataquery .ds-table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 13px; }
+.dataquery .ds-table th {
+  text-align: left; font-weight: 500; color: #8a9199;
+  padding: 8px 10px; border-bottom: 1px solid #e6e9ee; white-space: nowrap;
+}
+.dataquery .ds-table td { padding: 10px; border-bottom: 1px solid #f0f2f5; vertical-align: middle; }
+.dataquery .ds-table tr:last-child td { border-bottom: none; }
+.dataquery .ds-table .ds-name { font-weight: 500; color: #1d232b; }
+.dataquery .ds-table .ds-target {
+  color: #5b6370; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dataquery .ds-table th.ops, .dataquery .ds-table td.ops { text-align: right; white-space: nowrap; }
+.dataquery .ds-table td.ops button {
+  font-size: 12px; padding: 5px 10px; border-radius: 6px; margin-left: 6px;
+  border: 1px solid #d5d9de; background: #fff; color: #3d4450; cursor: pointer;
+}
+.dataquery .ds-table td.ops button:hover { border-color: #2160f3; color: #2160f3; }
+.dataquery .ds-table td.ops button.danger:hover { border-color: #d4382d; color: #d4382d; }
+
+/* 数据源表单字段多，弹窗加宽；`.span2` 让某一项跨两列 */
+.modal.wide { width: 560px; }
+.modal-form .span2 { grid-column: 1 / -1; }

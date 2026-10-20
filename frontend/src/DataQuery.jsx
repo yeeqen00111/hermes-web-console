@@ -1,257 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errorText } from "./api.js";
+import DataSources from "./dataquery/DataSources.jsx";
 
-// 智能问数页（2026-10-12）：两个子 tab。
-//   ① 数据库配置 —— **只管写配置**：把一条连接写进与 hermes-mcp 共享的 SQLite 注册表。
-//      本页不连数据库、不测连通（那是问数端的事），所以没有「测试」按钮。
-//   ② MCP 配置   —— hermes-mcp 是独立服务，用 HTTP 注册在 Hermes 上（config.yaml 的
+// 智能问数页：两个子 tab。
+//   ① 数据源    —— 见 ./dataquery/DataSources.jsx（**2026-10-20 起走后端 MCP**：多库 CRUD。
+//      后端是 hermes-mcp 的 MCP 客户端，控制台不再直读共享 SQLite）
+//   ② MCP 配置  —— hermes-mcp 是独立服务，用 HTTP 注册在 Hermes 上（config.yaml 的
 //      mcp_servers.<name>.url）。这页只**代理** Hermes dashboard 的 /api/mcp/*：
 //      列出来、添加、删除、启停、测试（是 Hermes 去连）。
 //      没有"改地址"——上游没有改单条的接口，硬做只能先删后建；要换地址就删了重加。
 //
-// 两条边界（页面侧）：
+// 页面侧边界：
 //   - 凭据只在后端：密码永远不回显，只给「已配置 / 未配置」；token 连后端都拿不到（上游只返摘要）。
 //   - 路径里只有占位符，没有写死的服务名（教训：/api/channels/feishu/restart）。
-//
-// 一期一个库：后端返回的是数组形状（以后放开多库不用改契约），这里只取第一条。
-const TYPE_OPTIONS = [
-  { id: "mysql", label: "MySQL", port: 3306, hint: "库名填 schema 名" },
-  { id: "postgresql", label: "PostgreSQL", port: 5432, hint: "库名填 database" },
-  { id: "sqlserver", label: "SQL Server", port: 1433, hint: "库名填 database" },
-  { id: "oracle", label: "Oracle", port: 1521, hint: "库名填服务名（service_name）" },
-];
-
-const MAX_ROWS_CAP = 1000;   // 与后端一致
-const DEFAULT_MAX_ROWS = 200;
 
 // 能被问数端调用的工具里，这两个是**写入口**（新增/删除连接），不该出现在对话里
 const WRITE_TOOLS = ["register_connection", "remove_connection"];
 const QUERY_TOOLS = ["ask", "query", "get_schema_map", "describe_table", "list_schemas", "list_connections", "ping"];
-
-const EMPTY_FORM = {
-  name: "", type: "mysql", host: "", port: 3306,
-  database: "", username: "", max_rows: DEFAULT_MAX_ROWS,
-};
-
-// ─────────────────────────── 数据库配置 ───────────────────────────
-
-function Databases() {
-  const [record, setRecord] = useState(null);   // 已保存的那条（null = 还没配过）
-  const [form, setForm] = useState(EMPTY_FORM);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
-  const [password, setPassword] = useState("");   // 只装「本次输入的新密码」
-  const [clearPw, setClearPw] = useState(false);  // 是否要清除已保存的密码
-  const [pwTouched, setPwTouched] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState(null);     // {kind:'ok'|'err', text}
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setLoadError("");
-    try {
-      const r = await api("/api/db-connections");
-      if (!r.ok) { setLoadError(await errorText(r)); return; }
-      const data = await r.json();
-      const row = (data.connections || [])[0] || null;
-      setRecord(row);
-      setForm(row ? {
-        name: row.name, type: row.type, host: row.host,
-        port: row.port ?? TYPE_OPTIONS.find((t) => t.id === row.type)?.port ?? 3306,
-        database: row.database, username: row.username,
-        max_rows: row.max_rows ?? DEFAULT_MAX_ROWS,
-      } : EMPTY_FORM);
-      // 密码不回显：留空 = 不改
-      setPassword("");
-      setClearPw(false);
-      setPwTouched(false);
-    } catch (e) {
-      setLoadError("请求失败：" + e.message);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  const typeMeta = TYPE_OPTIONS.find((t) => t.id === form.type);
-  const hasPassword = !!record?.has_password;
-
-  const requiredFilled = form.name.trim() && form.host.trim() && form.database.trim() && form.username.trim();
-  const dirty =
-    !record ||
-    pwTouched || clearPw ||
-    form.name !== record.name || form.type !== record.type || form.host !== record.host ||
-    Number(form.port) !== record.port || form.database !== record.database ||
-    form.username !== record.username || Number(form.max_rows) !== record.max_rows;
-
-  const onTypeChange = (id) => {
-    const next = TYPE_OPTIONS.find((t) => t.id === id);
-    setForm((f) => ({ ...f, type: id, port: next ? next.port : f.port }));
-  };
-
-  const save = async () => {
-    setSaving(true);
-    setNotice(null);
-    try {
-      const body = {
-        name: form.name.trim(), type: form.type, host: form.host.trim(),
-        port: Number(form.port), database: form.database.trim(),
-        username: form.username.trim(), max_rows: Number(form.max_rows),
-      };
-      // 密码三态：没动 → 不发字段；清除 → 空串；填了 → 新值
-      if (clearPw) body.password = "";
-      else if (pwTouched) body.password = password;
-
-      const r = await api("/api/db-connections", { method: "PUT", body: JSON.stringify(body) });
-      if (!r.ok) { setNotice({ kind: "err", text: "保存失败：" + (await errorText(r)) }); return; }
-      setNotice({
-        kind: "ok",
-        text: "已保存。对话里问数时用的就是这条配置——它和问数服务共用同一份注册表。",
-      });
-      await load();
-    } catch (e) {
-      setNotice({ kind: "err", text: "保存失败：" + e.message });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (loading) return <p className="hint">加载中…</p>;
-  if (loadError) {
-    return (
-      <div className="state-block">
-        <p>{loadError}</p>
-        <button className="ghost" onClick={load}>重试</button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="card">
-      <h3>{record ? "编辑数据源" : "添加数据源"}</h3>
-      <p className="meta">
-        这里只写配置：保存后配置就进了共享注册表，真正连库的是问数服务。
-        请使用<b>只有 SELECT 权限</b>的账号——页面无法校验权限，只读靠数据库侧保证。
-      </p>
-
-      {notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}
-
-      {record?.status && (
-        <p className="meta">
-          问数端最近一次使用结果：{record.status === "ok" ? "正常" : `失败（${record.last_error || "无详情"}）`}
-        </p>
-      )}
-
-      <div className="field-row">
-        <div className="field-label"><span className="field-name">名称 <em className="req">*</em></span></div>
-        <div className="field-edit">
-          <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
-                 placeholder="如：订单库（对话里会用这个名字指代这个库）" />
-        </div>
-        <div className="field-hint">建议把「数据内容」也写进名字，例如「电商订单库」——对话里选库只看得到名字。</div>
-      </div>
-
-      <div className="field-row">
-        <div className="field-label"><span className="field-name">类型 <em className="req">*</em></span></div>
-        <div className="field-edit">
-          <select value={form.type} onChange={(e) => onTypeChange(e.target.value)}>
-            {TYPE_OPTIONS.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
-          </select>
-        </div>
-        <div className="field-hint">{typeMeta?.hint}</div>
-      </div>
-
-      <div className="field-row">
-        <div className="field-label"><span className="field-name">主机 <em className="req">*</em></span></div>
-        <div className="field-edit">
-          <input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })}
-                 placeholder="IP 或主机名（问数服务要能访问到它）" />
-        </div>
-        <div className="field-hint">填的是<b>问数服务</b>所在网络里能访问到的主机——不是你本机能连的地址。</div>
-      </div>
-
-      <div className="field-row">
-        <div className="field-label"><span className="field-name">端口 <em className="req">*</em></span></div>
-        <div className="field-edit">
-          <input type="number" min="1" max="65535" value={form.port}
-                 onChange={(e) => setForm({ ...form, port: e.target.value })} />
-        </div>
-        <div className="field-hint">选类型时已带默认值，按需改。</div>
-      </div>
-
-      <div className="field-row">
-        <div className="field-label"><span className="field-name">库名 <em className="req">*</em></span></div>
-        <div className="field-edit">
-          <input value={form.database} onChange={(e) => setForm({ ...form, database: e.target.value })}
-                 placeholder={form.type === "oracle" ? "服务名（service_name）" : "数据库名"} />
-        </div>
-        <div className="field-hint">{typeMeta?.hint}</div>
-      </div>
-
-      <div className="field-row">
-        <div className="field-label"><span className="field-name">账号 <em className="req">*</em></span></div>
-        <div className="field-edit">
-          <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })}
-                 placeholder="只有 SELECT 权限的账号" />
-        </div>
-      </div>
-
-      <div className={`field-row${clearPw ? " clearing" : ""}`}>
-        <div className="field-label">
-          <span className="field-name">密码</span>
-          <span className={`chip ${hasPassword ? "on" : "off"}`}>{hasPassword ? "已配置" : "未配置"}</span>
-        </div>
-        <div className="field-edit">
-          <input
-            type="password"
-            value={clearPw ? "" : password}
-            disabled={clearPw}
-            placeholder={clearPw ? "将清除（保存后删除）"
-              : hasPassword ? "已配置 · 填这里可覆盖" : (record ? "未配置" : "首次保存必填")}
-            onChange={(e) => { setClearPw(false); setPwTouched(true); setPassword(e.target.value); }}
-          />
-          <button type="button" className={`ghost tiny ${clearPw ? "" : "danger-soft"}`}
-                  disabled={!hasPassword && !pwTouched}
-                  onClick={() => { setClearPw((v) => !v); setPassword(""); }}>
-            {clearPw ? "撤销" : "✕ 清除"}
-          </button>
-        </div>
-        <div className="field-hint">
-          密码存进共享注册表时是加密的（与问数服务同一把密钥），<b>页面和接口都不会回显</b>。
-        </div>
-      </div>
-
-      <div className="field-row">
-        <div className="field-label"><span className="field-name">行数上限</span></div>
-        <div className="field-edit">
-          <input type="number" min="1" max={MAX_ROWS_CAP} value={form.max_rows}
-                 onChange={(e) => setForm({ ...form, max_rows: e.target.value })} />
-        </div>
-        <div className="field-hint">单次查询最多返回多少行（1–{MAX_ROWS_CAP}，默认 {DEFAULT_MAX_ROWS}）。</div>
-      </div>
-
-      <div className="field-row">
-        <div className="field-label"><span className="field-name">只读</span></div>
-        <div className="field-edit">
-          <span className="chip on">强制只读</span>
-        </div>
-        <div className="field-hint">本页只配置只读连接，不提供改写开关。</div>
-      </div>
-
-      <div className="channel-actions">
-        <button className="ghost" onClick={load} disabled={saving}>刷新</button>
-        <button onClick={save} disabled={saving || !dirty || !requiredFilled}>
-          {saving ? "保存中…" : "保存"}
-        </button>
-      </div>
-      <p className="footnote">
-        {record ? "改名会替换掉原来那条" : "保存后会新增一条"}；一期只支持<b>一个</b>数据源。
-        改完立即生效——问数服务每次调用都直接读这份注册表。
-      </p>
-    </div>
-  );
-}
 
 // ─────────────────────────── MCP 配置 ───────────────────────────
 
@@ -505,7 +270,7 @@ function McpServers() {
 // ─────────────────────────── 外壳 ───────────────────────────
 
 const TABS = [
-  { id: "databases", label: "数据库配置", Component: Databases },
+  { id: "datasources", label: "数据源", Component: DataSources },
   { id: "mcp", label: "MCP 配置", Component: McpServers },
 ];
 
