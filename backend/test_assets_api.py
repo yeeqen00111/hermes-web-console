@@ -50,6 +50,9 @@ class _FakeAssets:
 
     async def __call__(self, tool, arguments=None, **kw):
         a = dict(arguments or {})
+        if tool == "list_connections":
+            # 本层写知识/模板前会校验数据源存在（MCP 不校验）
+            return {"connections": [{"name": n} for n in ("mysql_local", "另一个库")]}
         if tool == "list_knowledge_entries":
             return {"entries": self._filtered(self.entries, a.get("connection", ""))}
         if tool == "search_knowledge":
@@ -117,18 +120,25 @@ class AssetsApiTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["term"], "活跃客户")
 
-    def test_knowledge_filter_includes_global(self):
-        """选某个数据源时，**全局条目也要出现**（MCP 的 list 就是 connection IN (x, '*')）。"""
-        self._know(connection="mysql_local", term="本库术语")
-        self._know(connection="*", term="全局术语")
+    def test_knowledge_filter_by_source(self):
+        """选某个数据源时只返回它的条目——**全局已取消**（2026-10-20 产品决定）。"""
+        self._know(connection="mysql_local", term="本库标签")
         self._know(connection="另一个库", term="别家的")
 
         only_this = self.client.get("/api/knowledge-entries?connection=mysql_local").json()["entries"]
-        terms = sorted(e["term"] for e in only_this)
-        self.assertEqual(terms, ["全局术语", "本库术语"], "全局必须一起返回，别家的不能出现")
+        self.assertEqual([e["term"] for e in only_this], ["本库标签"])
 
         all_of_them = self.client.get("/api/knowledge-entries").json()["entries"]
-        self.assertEqual(len(all_of_them), 3, "不传 connection = 全部")
+        self.assertEqual(len(all_of_them), 2, "不传 connection = 全部")
+
+    def test_knowledge_rejects_global_and_unknown_source(self):
+        """`'*'` 全局已取消；数据源必须真实存在（MCP 不校验，挂错名字就再也看不见）。"""
+        for conn, expect in (("*", "全局"), ("", "数据源"), ("不存在的库", "不存在")):
+            with self.subTest(connection=conn):
+                r = self._know(connection=conn)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn(expect, r.json()["detail"])
+        self.assertEqual(self.client.get("/api/knowledge-entries").json()["count"], 0)
 
     def test_knowledge_update(self):
         eid = self._know().json()["id"]
@@ -150,7 +160,7 @@ class AssetsApiTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/api/knowledge-entries/{eid}").status_code, 404)
 
     def test_knowledge_rejects_empty_fields(self):
-        for over, expect in (({"term": ""}, "术语"), ({"definition": "   "}, "口径")):
+        for over, expect in (({"term": ""}, "标签"), ({"definition": "   "}, "知识切片")):
             with self.subTest(over=over):
                 r = self._know(**over)
                 self.assertEqual(r.status_code, 400)
@@ -166,9 +176,12 @@ class AssetsApiTests(unittest.TestCase):
         hits = r.json()["hits"]
         self.assertEqual([h["term"] for h in hits], ["活跃客户"])
 
-    def test_knowledge_search_requires_query(self):
-        r = self.client.get("/api/knowledge-entries/search?query=%20")
-        self.assertEqual(r.status_code, 400)
+    def test_knowledge_search_requires_query_and_source(self):
+        for qs, expect in (("connection=mysql_local&query=%20", "问题"), ("query=活跃", "数据源")):
+            with self.subTest(qs=qs):
+                r = self.client.get(f"/api/knowledge-entries/search?{qs}")
+                self.assertEqual(r.status_code, 400)
+                self.assertIn(expect, r.json()["detail"])
 
     # ── SQL 模板 ──
 
@@ -181,12 +194,20 @@ class AssetsApiTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["name"], "武汉客户数")
 
-    def test_template_filter_includes_global(self):
+    def test_template_filter_by_source(self):
+        """全局已取消——选某个数据源只返回它的模板。"""
         self._tpl(connection="mysql_local", name="本库")
-        self._tpl(connection="*", name="全局")
-        names = sorted(t["name"] for t in
-                       self.client.get("/api/sql-templates?connection=mysql_local").json()["templates"])
-        self.assertEqual(names, ["全局", "本库"])
+        self._tpl(connection="另一个库", name="别家的")
+        names = [t["name"] for t in
+                 self.client.get("/api/sql-templates?connection=mysql_local").json()["templates"]]
+        self.assertEqual(names, ["本库"])
+
+    def test_template_rejects_global_and_unknown_source(self):
+        for conn, expect in (("*", "全局"), ("", "数据源"), ("不存在的库", "不存在")):
+            with self.subTest(connection=conn):
+                r = self._tpl(connection=conn)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn(expect, r.json()["detail"])
 
     def test_template_update_and_missing_404(self):
         tid = self._tpl().json()["id"]

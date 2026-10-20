@@ -4,10 +4,9 @@
 控制台只是 hermes-mcp 的 **MCP 客户端**——这两样数据都在 mcp 侧的 assets 库里
 （`hermes_mcp_assets.db`），控制台不碰任何文件。
 
-**过滤语义**（源码实测，决定前端过滤器怎么画）：
-  - 不传 `connection` → 全部条目
-  - 传某个数据源     → **该数据源的 + 全局（`'*'`）的**（全局始终包含）
-所以前端过滤器只需要「全部 / 各数据源」，**不需要**单独的"全局"选项。
+**过滤语义**（源码实测）：MCP 的 `list(connection)` 返回**该数据源的 + 全局（`'*'`）的**。
+但**本产品不要全局条目**（2026-10-20 用户定）：所以 `connection` 是**必填**、且拒收 `'*'`，
+写之前还会校验数据源真实存在。线上历史数据里全局条目为 0，无需迁移。
 
 **本层要补的（MCP 不做的）**：
   1. `update_*` 对不存在的 id 会**抛异常且不给原因** → 先查一遍，才能给出 404。
@@ -48,25 +47,47 @@ def _text(value: Optional[str], field: str, *, required: bool, cap: int = MAX_TE
     return out
 
 
+def _connection_of(raw: str) -> str:
+    """`connection` 必填、**拒收全局 `'*'`**（2026-10-20 产品决定：不要全局条目）。"""
+    conn = (raw or "").strip()
+    if not conn:
+        raise HTTPException(status_code=400, detail="必须指定一个数据源")
+    if conn == "*":
+        raise HTTPException(status_code=400, detail="不支持全局条目，请指定具体数据源")
+    return conn
+
+
+async def _ensure_connection(conn: str) -> None:
+    """数据源必须真实存在——否则这条知识/模板会挂在一个永远对不上的名字上，
+    页面上再也看不见（MCP 不会替你校验）。"""
+    if conn not in await _connection_names():
+        raise HTTPException(status_code=400, detail=f"数据源「{conn}」不存在")
+
+
+async def _connection_names() -> set:
+    data = await _call("list_connections", {})
+    return {c.get("name") for c in (data.get("connections") or []) if c.get("name")}
+
+
 # ─────────────────────────── 知识库 ───────────────────────────
 
 class KnowledgeForm(BaseModel):
-    """业务知识：术语 + 定义/口径。
+    """业务知识：标签 + 知识切片。
 
-    `connection` = 所属数据源名，或 **`'*'` = 全局**（默认）。全局条目对所有数据源都生效。
+    `connection` = 所属数据源名（**必填，不能再是 `'*'` 全局**）。
     """
     term: str = ""
     definition: str = ""
-    connection: str = "*"
+    connection: str = ""
     anchor: str = ""
     note: str = ""
 
 
 def _knowledge_args(form: KnowledgeForm) -> Dict[str, Any]:
     return {
-        "term": _text(form.term, "术语", required=True),
-        "definition": _text(form.definition, "定义/口径", required=True),
-        "connection": (form.connection or "*").strip() or "*",
+        "term": _text(form.term, "标签", required=True),
+        "definition": _text(form.definition, "知识切片", required=True),
+        "connection": _connection_of(form.connection),
         "anchor": _text(form.anchor, "出处", required=False),
         "note": _text(form.note, "备注", required=False),
     }
@@ -80,7 +101,10 @@ async def _knowledge_ids(connection: str = "") -> set:
 
 @knowledge_router.get("", dependencies=[Depends(require_app_token)])
 async def list_entries(connection: str = "") -> Dict[str, Any]:
-    """列出知识条目。不传 `connection` = 全部；传了就返回**该数据源 + 全局**。"""
+    """列出知识条目。不传 `connection` = 全部；传了 = 该数据源的。
+
+    （MCP 的 list 仍会把 `'*'` 全局一起给，但本产品已**禁止创建**全局，所以只有历史数据才可能碰到。）
+    """
     args = {"connection": connection.strip()} if connection.strip() else {}
     data = await _call("list_knowledge_entries", args)
     entries: List[Dict[str, Any]] = data.get("entries") or []
@@ -91,11 +115,11 @@ async def list_entries(connection: str = "") -> Dict[str, Any]:
 async def search_entries(connection: str = "", query: str = "", limit: int = 8) -> Dict[str, Any]:
     """「试一下」：输入一个问题，看会命中哪些口径（**这是验证知识库生效的唯一手段**）。
 
-    检索是 mcp 侧的 FTS5 trigram 全文索引，对中文友好；`connection` 为空时按全局处理。
+    检索是 mcp 侧的 FTS5 trigram 全文索引，对中文友好；`connection` **必填**（全局已取消）。
     """
     q = _text(query, "问题", required=True, cap=500)
     data = await _call("search_knowledge", {
-        "connection": connection.strip() or "*",
+        "connection": _connection_of(connection),   # 全局已取消 → 检索必须指定数据源
         "query": q,
         "limit": max(1, min(int(limit), 50)),
     })
@@ -105,16 +129,20 @@ async def search_entries(connection: str = "", query: str = "", limit: int = 8) 
 
 @knowledge_router.post("", dependencies=[Depends(require_app_token)])
 async def create_entry(body: KnowledgeForm) -> Dict[str, Any]:
-    data = await _call("create_knowledge_entry", _knowledge_args(body))
+    args = _knowledge_args(body)
+    await _ensure_connection(args["connection"])
+    data = await _call("create_knowledge_entry", args)
     return {"ok": True, "id": data.get("id")}
 
 
 @knowledge_router.put("/{entry_id}", dependencies=[Depends(require_app_token)])
 async def update_entry(entry_id: int, body: KnowledgeForm) -> Dict[str, Any]:
     """按 id 改。⚠️ MCP 对不存在的 id 抛异常且不给原因，所以先查一遍换 404。"""
+    args = _knowledge_args(body)
+    await _ensure_connection(args["connection"])
     if entry_id not in await _knowledge_ids():
         raise HTTPException(status_code=404, detail=f"知识条目 {entry_id} 不存在")
-    data = await _call("update_knowledge_entry", {"id": entry_id, **_knowledge_args(body)})
+    data = await _call("update_knowledge_entry", {"id": entry_id, **args})
     return {"ok": True, "id": data.get("id", entry_id)}
 
 
@@ -132,11 +160,12 @@ class TemplateForm(BaseModel):
     """内置 SQL：用户说法 + 标准 SQL。
 
     `params` 是给**人看**的参数说明（JSON 对象字符串），例如 `{"year": "年份"}`。
+    `connection` = 所属数据源名（**必填，不能再是 `'*'` 全局**）。
     """
     question: str = ""
     sql: str = ""
     name: str = ""
-    connection: str = "*"
+    connection: str = ""
     params: str = "{}"
     note: str = ""
 
@@ -166,7 +195,7 @@ def _template_args(form: TemplateForm) -> Dict[str, Any]:
         "question": _text(form.question, "问题", required=True),
         "sql": sql,
         "name": _text(form.name, "名称", required=False),
-        "connection": (form.connection or "*").strip() or "*",
+        "connection": _connection_of(form.connection),
         "params": json.dumps(parsed, ensure_ascii=False),
         "note": _text(form.note, "备注", required=False),
     }
@@ -180,7 +209,7 @@ async def _template_ids(connection: str = "") -> set:
 
 @templates_router.get("", dependencies=[Depends(require_app_token)])
 async def list_templates(connection: str = "") -> Dict[str, Any]:
-    """列出模板。不传 `connection` = 全部；传了就返回**该数据源 + 全局**。"""
+    """列出模板。不传 `connection` = 全部；传了 = 该数据源的（同上：全局已禁止创建）。"""
     args = {"connection": connection.strip()} if connection.strip() else {}
     data = await _call("list_sql_templates", args)
     items: List[Dict[str, Any]] = data.get("templates") or []
@@ -189,16 +218,20 @@ async def list_templates(connection: str = "") -> Dict[str, Any]:
 
 @templates_router.post("", dependencies=[Depends(require_app_token)])
 async def create_template(body: TemplateForm) -> Dict[str, Any]:
-    data = await _call("create_sql_template", _template_args(body))
+    args = _template_args(body)
+    await _ensure_connection(args["connection"])
+    data = await _call("create_sql_template", args)
     return {"ok": True, "id": data.get("id")}
 
 
 @templates_router.put("/{template_id}", dependencies=[Depends(require_app_token)])
 async def update_template(template_id: int, body: TemplateForm) -> Dict[str, Any]:
     """按 id 改。⚠️ MCP 对不存在的 id 抛异常且不给原因，所以先查一遍换 404。"""
+    args = _template_args(body)
+    await _ensure_connection(args["connection"])
     if template_id not in await _template_ids():
         raise HTTPException(status_code=404, detail=f"SQL 模板 {template_id} 不存在")
-    data = await _call("update_sql_template", {"id": template_id, **_template_args(body)})
+    data = await _call("update_sql_template", {"id": template_id, **args})
     return {"ok": True, "id": data.get("id", template_id)}
 
 

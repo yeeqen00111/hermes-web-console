@@ -283,12 +283,14 @@ data: {"type":"<事件名>","session_id":"...","stored_session_id":"...","profil
 
 ## 6. 智能问数
 
-> 「问数」tab 两个子页。**2026-10-20 起控制台改走 MCP**：原来"控制台与 hermes-mcp
+> 「问数」tab 四个子页。**2026-10-20 起控制台改走 MCP**：原来"控制台与 hermes-mcp
 > 共读同一个 SQLite 文件"的通道**已废弃**——那要求两端逐字对齐表结构与密码加密格式，
 > 任何一侧改了另一侧就静默坏掉。现在 **MCP 是数据的唯一主人**，加密与校验只在它那边有一份。
 >
-> - **数据源**：控制台是 hermes-mcp 的 **MCP 客户端**——它只**写配置**，不连数据库、
->   不测连通（所以没有"测试连接"接口）；真正连库的是 hermes-mcp。
+> - **数据源 / 知识库 / SQL 模板**：控制台是 hermes-mcp 的 **MCP 客户端**——只管配置，
+>   不连数据库、不测连通（所以没有"测试连接"接口）；真正连库的是 hermes-mcp。
+>   ⚠️ **知识库和模板都没有"全局"**（2026-10-20 产品决定）：`connection` **必填**、
+>   必须是真实存在的数据源，后端**拒收 `'*'`**。
 > - **MCP 配置**：不同的事——它**代理 Hermes dashboard** 的 `/api/mcp/*`，
 >   把问数服务注册到 Hermes 上。
 
@@ -351,7 +353,56 @@ data: {"type":"<事件名>","session_id":"...","stored_session_id":"...","profil
 **密码三态**（与模型配置的 `api_key` 一致）：不发 `password` = 保持原值 ｜ `""` = 清除 ｜ 非空 = 换新。
 > 与 Hermes 渠道的 `env` 语义**相反**（那边空串是"跳过"，不清除）。
 
-### 6.2 MCP 服务配置（代理 Hermes dashboard）
+### 6.2 知识库（标签 + 知识切片）
+
+> 存的是**业务标签和知识切片**（"活跃客户"到底指什么）。问数时命中的切片会被**注入到
+> 生成 SQL 的提示里**——所以改这里 = 改所有人问出来的数字含义。
+> ⚠️ **没有全局条目**：`connection` **必填**、必须是**真实存在**的数据源，拒收 `'*'`。
+
+#### `GET /api/knowledge-entries?connection=<数据源名>`
+- `connection` 可选：传了返回该数据源的条目；不传返回全部
+- `200`：`{ "entries": [{ "id", "connection", "term", "definition", "anchor", "note", "created_at", "updated_at" }], "count": n }`
+  - `term` = 标签，`definition` = 知识切片（**接口字段名不变**，只是界面叫法改了）
+- `502` 连不上问数服务
+
+#### `GET /api/knowledge-entries/search?connection=<数据源名>&query=<问题>&limit=8`
+「**试一下**」：输入一个问题，看会命中哪些切片（问数侧是 FTS5 trigram 全文检索，对中文友好）。
+**这是验证一条切片有没有生效的唯一手段。**
+- `connection` **必填**；`query` 必填（≤500 字符）；`limit` 1–50，默认 8
+- `200`：`{ "hits": [...], "count": n }`
+- `400` 缺问题 / 缺数据源；`502`
+
+#### `POST /api/knowledge-entries`
+- 请求体：`{ "term", "definition", "connection", "anchor"?, "note"? }`
+- `200`：`{ "ok": true, "id": n }`（`id` 由问数服务分配）
+- `400`：标签/切片为空、**数据源不存在**、`connection` 为空或为 `'*'`；`502`
+
+#### `PUT /api/knowledge-entries/{entry_id}`
+- 按 id 改（id 是问数服务分配的整数）。请求体同 `POST`
+- `200`：`{ "ok": true, "id": n }`；`400`；**`404` 不存在**（上游对未知 id 抛异常且不给原因，由本层先查再翻）
+
+#### `DELETE /api/knowledge-entries/{entry_id}`
+- `200`：`{ "ok": true, "id": n }`；**`404` 不存在**
+
+### 6.3 SQL 模板
+
+> 「用户这么说 → 就用这条 SQL」的沉淀，问数时会优先匹配。同样**没有全局**。
+
+#### `GET /api/sql-templates?connection=<数据源名>`
+- `connection` 可选：传了返回该数据源的；不传返回全部
+- `200`：`{ "templates": [{ "id", "connection", "question", "sql", "name", "params", "note", ... }], "count": n }`
+
+#### `POST /api/sql-templates`
+- 请求体：`{ "question", "sql", "connection", "name"?, "params"?, "note"? }`
+  - `sql` **必须是只读查询**（`SELECT` / `WITH` 开头）——本层先拦、给可读的 400；**权威校验在问数服务**
+  - `params` 是给**人看**的参数说明，必须是 **JSON 对象**字符串（如 `{"year": "年份"}`）
+  - `connection` 必须是**真实存在**的数据源
+- `200`：`{ "ok": true, "id": n }`；`400`（SQL 非只读 / params 非 JSON 对象 / 数据源不存在）；`502`
+
+#### `PUT /api/sql-templates/{template_id}` · `DELETE /api/sql-templates/{template_id}`
+- 同知识库：`200` `{ "ok": true, "id": n }`；`404` 不存在；`400` / `502`
+
+### 6.4 MCP 服务配置（代理 Hermes dashboard）
 
 > ⚠️ 我们的路径是 **`/api/mcp-servers`**（连字符）；上游是 `/api/mcp/servers`。前端与后端同源，照抄上游路径会撞，所以特意改了连字符。
 
