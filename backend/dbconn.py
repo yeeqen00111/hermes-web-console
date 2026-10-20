@@ -22,7 +22,6 @@
     POST   /api/db-connections          新增（重名 409）
     PUT    /api/db-connections/{name}   覆盖一条已存在的（不存在 404；**不支持改名**）
     DELETE /api/db-connections/{name}   删除（不存在 404）
-    PUT    /api/db-connections          ⚠️ 过渡期兼容别名 = upsert，前端切换完即删
 """
 from __future__ import annotations
 
@@ -227,17 +226,4 @@ async def delete_connection(name: str) -> Dict[str, Any]:
     res = await _call("remove_connection", {"name": name})
     if not res.get("ok"):
         raise HTTPException(status_code=404, detail=f"数据源「{name}」不存在")
-    return {"ok": True, "name": name}
-
-
-@router.put("", dependencies=[Depends(require_app_token)], deprecated=True)
-async def upsert_connection_compat(body: ConnectionForm) -> Dict[str, Any]:
-    """⚠️ **过渡期兼容别名**（2026-10-20 加）：语义 = upsert（有则改、没有则建）。
-
-    只为让还没改的前端继续能用；前端切到 `POST` + `PUT /{name}` 之后**连同这个函数一起删**。
-    旧前端不读响应体（只判 `r.ok` 然后重新拉列表），所以返回形状变了也不影响它。
-    """
-    name = _clean_name(body.name)
-    fields, _ = _clean(body)
-    await _register(name, fields, body.password)
     return {"ok": True, "name": name}

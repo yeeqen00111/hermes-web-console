@@ -253,20 +253,17 @@ class DbConnApiTests(unittest.TestCase):
                 self.assertIn(expect, r.json()["detail"])
         self.assertEqual(self._list(), [], "被拒的请求不该留下任何记录")
 
-    # ── 过渡期兼容别名 ──
+    # ── 过渡期兼容别名已移除 ──
 
-    def test_compat_put_upserts(self):
-        """`PUT /api/db-connections`（无 {name}）= upsert，给还没改的前端用。"""
-        body = dict(_form, password="p")
-        r = self.client.put("/api/db-connections", json=body)
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(len(self._list()), 1)
+    def test_upsert_alias_is_gone(self):
+        """`PUT /api/db-connections`（不带 {name}）是前端切换期的临时别名，2026-10-20 已删。
 
-        body["database"] = "shop2"                       # 再来一次 = 改，不是新增
-        r = self.client.put("/api/db-connections", json=body)
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(len(self._list()), 1)
-        self.assertEqual(self._list()[0]["database"], "shop2")
+        钉住它：新增走 POST、修改走 PUT /{name}，别再让它悄悄长回来——
+        "无 {name} 的 upsert" 和 "带 {name} 的 404 语义" 同时存在会让契约变得含糊。
+        """
+        r = self.client.put("/api/db-connections", json=dict(_form, password="p"))
+        self.assertIn(r.status_code, (404, 405))
+        self.assertEqual(self._list(), [])
 
     # ── 依赖不可用 ──
 
