@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errorText } from "../api.js";
 import Modal from "./Modal.jsx";
-import { GLOBAL, useConnectionNames } from "./useConnections.js";
+import { useConnectionNames } from "./useConnections.js";
 
 // 智能问数 · 内置 SQL 模板（阶段 5，2026-10-20）
 //
-// 「用户这么说 → 就用这条 SQL」的沉淀。和知识库同一套形状：列表 + 弹窗 + 全局/专属。
+// 「用户这么说 → 就用这条 SQL」的沉淀。和知识库同一套形状：列表 + 弹窗 + 按数据源过滤。
 // 与知识库的三点不同：
-//   1. 主键是 **id**（MCP 分配的整数），所以 `question` 可以随便改；知识库同理，
-//      但数据源那边是 name 定位、不能改名。
+//   1. 主键是 **id**（MCP 分配的整数），所以 `question` 可以随便改。
 //   2. **SQL 必须是只读语句**（SELECT / WITH 开头）——MCP 会校验，但报错没有细节，
 //      所以后端先拦一层给可读的 400。
 //   3. **没有「试一下」**：MCP 没给模板的检索工具（知识库才有 search_knowledge）。
+//
+// **没有全局模板**（2026-10-20 用户定）：每条都必须挂在一个具体数据源上，后端也拒收 `'*'`。
 
-const EMPTY = { question: "", sql: "", name: "", connection: GLOBAL, params: "{}", note: "" };
+const EMPTY = { question: "", sql: "", name: "", connection: "", params: "{}", note: "" };
 
 export default function SqlTemplates() {
   const names = useConnectionNames();
@@ -82,8 +83,7 @@ export default function SqlTemplates() {
         </div>
       </div>
       <p className="meta">
-        把「用户这么说 → 就用这条 SQL」沉淀下来，问数时会优先匹配。
-        选某个数据源时，列表会连<b>全局</b>模板一起显示。
+        把「用户这么说 → 就用这条 SQL」沉淀下来，问数时会优先匹配。每条都属于一个数据源。
       </p>
 
       {notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}
@@ -101,9 +101,7 @@ export default function SqlTemplates() {
                 <td className="ds-name">{row.question}</td>
                 <td>{row.name || "—"}</td>
                 <td className="ds-clip mono" title={row.sql}>{oneLine(row.sql)}</td>
-                <td>{row.connection === GLOBAL
-                  ? <span className="chip mark">全局</span>
-                  : row.connection}</td>
+                <td>{row.connection}</td>
                 <td className="ops">
                   <button className="ghost" onClick={() => { setNotice(null); setEditing({ mode: "edit", row }); }}>编辑</button>
                   <button className="ghost danger" onClick={() => { setNotice(null); setDeleting(row); }}>删除</button>
@@ -136,16 +134,18 @@ export default function SqlTemplates() {
 
 function TemplateForm({ mode, record, names, onClose, onSaved }) {
   const isNew = mode === "new";
-  const [form, setForm] = useState(() => (isNew ? { ...EMPTY } : {
-    question: record.question || "", sql: record.sql || "", name: record.name || "",
-    connection: record.connection || GLOBAL,
-    params: record.params || "{}", note: record.note || "",
-  }));
+  const [form, setForm] = useState(() => (isNew
+    ? { ...EMPTY, connection: names[0] || "" }
+    : {
+      question: record.question || "", sql: record.sql || "", name: record.name || "",
+      connection: record.connection || "",
+      params: record.params || "{}", note: record.note || "",
+    }));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
-  const canSave = form.question.trim() !== "" && form.sql.trim() !== "";
+  const canSave = form.question.trim() !== "" && form.sql.trim() !== "" && form.connection !== "";
 
   const submit = async () => {
     setSaving(true);
@@ -187,9 +187,10 @@ function TemplateForm({ mode, record, names, onClose, onSaved }) {
         <label>
           所属
           <select value={form.connection} onChange={(e) => set("connection", e.target.value)}>
-            <option value={GLOBAL}>全局（对所有数据源生效）</option>
+            <option value="" disabled>请选择数据源</option>
             {names.map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
+          {names.length === 0 && <em className="hint">还没有数据源，先去「数据源」页添加一个。</em>}
         </label>
         <label>
           参数说明

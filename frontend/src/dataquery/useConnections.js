@@ -17,6 +17,3 @@ export function useConnectionNames() {
   }, []);
   return names;
 }
-
-/** `'*'` 在 UI 上叫「全局」——它对所有数据源都生效。 */
-export const GLOBAL = "*";
