@@ -9,8 +9,9 @@
 # 全套（含 Hermes）见 docker-compose.with-hermes.yml。
 #
 # 网络：bridge + 服务名互访（不用 host 模式，Windows 上 host 行为受限）。
-# 共享 SQLite：两边挂同一个宿主机目录 ./shared/sqlite，指向同一个文件——
-#   这是控制台与 mcp 之间**唯一**的协作方式（没有网络调用）。
+# 协作方式（**2026-10-20 改**）：控制台走 **MCP**（http://hermes-mcp:9123/mcp），
+#   hermes-mcp 是数据的唯一主人——控制台不再读那份共享 SQLite，也不再需要加密 key。
+#   ./shared/sqlite 现在**只有 hermes-mcp 自己挂**。
 
 services:
   console:
@@ -29,10 +30,12 @@ services:
     environment:
       # 下面几条是**结构性**的（跟编排走的，不适合放进 .env）：
       HIDDEN_DB_PATH: /data/hidden_models.db
-      HERMESMCP_DB_CONFIG: /shared/db_connections.db
+      # 控制台访问问数服务的**唯一出口**。同 network 内用服务名（Docker DNS）。
+      # 控制台已不再读 HERMESMCP_DB_KEY / 不再挂 /shared —— 加密与校验都在 mcp 那边
+      # （key 仍会经 env_file 传进容器，那是 compose 插值和 mcp 服务要用的，控制台不读）。
+      HERMESMCP_URL: "http://hermes-mcp:9123/mcp"
     volumes:
       - console-data:/data
-      - ./shared/sqlite:/shared
     networks: [agentnet]
 
   # ── 问数 MCP 服务（HTTP/streamable，端点固定 /mcp）────────────────────

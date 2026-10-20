@@ -16,7 +16,8 @@
 # 数据落位（一个业务一个文件夹）：
 #   D:\WSL\docker\Volumes\hermes-agent-data\   ← Hermes 家目录（配置/会话/密钥）
 #   D:\WSL\docker\Volumes\hermes-console\      ← 控制台自己的库（模型配置/隐藏清单）
-#   D:\WSL\docker\Volumes\hermes-shared\       ← 控制台与 mcp 共享的数据库注册表
+#   D:\WSL\docker\Volumes\hermes-shared\       ← **只有 hermes-mcp 挂**：数据源注册表 +
+#                                                知识库/模板（2026-10-20 起控制台不再挂它）
 #
 # ⚠️ 四点提醒：
 #   1. 用 bind 挂载后，`docker volume ls` 里**看不到**它们（bind 不是 docker 卷）；
@@ -91,14 +92,14 @@ services:
       # （Docker Desktop 上容器里的 127.0.0.1 是容器自己，不是宿主）。
       HERMES_BASE: "http://gateway:9119"
       HIDDEN_DB_PATH: /data/hidden_models.db
-      HERMESMCP_DB_CONFIG: /shared/db_connections.db
+      # 控制台访问问数服务的**唯一出口**（2026-10-20 改）。
+      # 控制台已不再挂 hermes-shared、也不再读 HERMESMCP_DB_KEY（key 仍会经 env_file
+      # 传进来，那是 compose 插值和 mcp 服务要用的，控制台不读）。
+      HERMESMCP_URL: "http://hermes-mcp:9123/mcp"
     volumes:
       - type: bind
         source: D:/WSL/docker/Volumes/hermes-console
         target: /data
-      - type: bind
-        source: D:/WSL/docker/Volumes/hermes-shared
-        target: /shared
     networks: [agentnet]
 
   # ── 问数 MCP 服务（HTTP/streamable）──────────────────────────────────

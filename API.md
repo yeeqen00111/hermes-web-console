@@ -283,48 +283,73 @@ data: {"type":"<事件名>","session_id":"...","stored_session_id":"...","profil
 
 ## 6. 智能问数
 
-> 「问数」tab 两个子页。**两条链路完全不同**，别混：
-> - **数据库配置**：控制台只把配置写进**与问数服务共享的 SQLite 文件**——不连数据库、不测连通（所以没有"测试"接口）；真正连库的是 hermes-mcp。
-> - **MCP 配置**：只是**代理 Hermes dashboard** 的 `/api/mcp/*`（问数服务是独立服务、以 URL 注册在 Hermes 上）；控制台不连 hermes-mcp，也拿不到它的凭据。
+> 「问数」tab 两个子页。**2026-10-20 起控制台改走 MCP**：原来"控制台与 hermes-mcp
+> 共读同一个 SQLite 文件"的通道**已废弃**——那要求两端逐字对齐表结构与密码加密格式，
+> 任何一侧改了另一侧就静默坏掉。现在 **MCP 是数据的唯一主人**，加密与校验只在它那边有一份。
+>
+> - **数据源**：控制台是 hermes-mcp 的 **MCP 客户端**——它只**写配置**，不连数据库、
+>   不测连通（所以没有"测试连接"接口）；真正连库的是 hermes-mcp。
+> - **MCP 配置**：不同的事——它**代理 Hermes dashboard** 的 `/api/mcp/*`，
+>   把问数服务注册到 Hermes 上。
 
-### 6.1 数据库配置（共享 SQLite）
+### 6.1 数据源
 
 #### `GET /api/db-connections`
-- `200`：`{ "connections": [...], "count": n }`（**一期恒为 0 或 1 条**；表本身支持多条，这是接口形状，将来放开多库不改契约）
+列出全部数据源。
+- `200`：`{ "connections": [...], "count": n }`
 - 单条字段：
 ```json
 {
-  "id": 1, "name": "订单库", "type": "mysql",
+  "name": "订单库", "type": "mysql",
   "host": "10.0.0.5", "port": 3306, "database": "shop", "username": "reporter",
   "read_only": true, "max_rows": 200,
-  "has_password": true, "status": null, "last_error": null,
-  "created_at": "...", "updated_at": "..."
+  "has_password": true, "status": null, "last_error": null
 }
 ```
 - ⚠️ **永不回显密码**（明文、密文都不给），只有 `has_password` 布尔
-- `status` / `last_error` 由**问数服务**写入（它用库的结果），控制台只读展示
-- `502`：后端未配置 `HERMESMCP_DB_KEY`（无法处理密码）
+- ⚠️ **没有 `id` / `created_at` / `updated_at`**：上游 `list_connections` 不回传它们。
+  定位一条数据源靠 **`name`**（所以名称是它的身份，见下）
+- ⚠️ `status` / `last_error` **目前恒为 `null`**——问数服务侧还没有写入它们
+  （源码里 `set_status()` 定义了但零调用点）。后端**原样透传**，页面不展示
+- `502` 连不上问数服务
 
-#### `PUT /api/db-connections`
-新增或修改唯一那条（**幂等**：有则改、没有则建）。改名 = 换行（不会出现两条）。
+#### `GET /api/db-connections/types`
+类型目录：**前端表单与后端校验共用这一份**（不在前端写死）。
+- `200`：`{ "types": [{ "id", "label", "group", "default_port", "hints" }], "field_labels": {...} }`
+- 类型集 = 关系库 8 种（`mysql` / `postgresql` / `sqlserver` / `oracle` /
+  `oceanbase_mysql` / `oceanbase_oracle` / `opengauss` / `dameng`）+ `sqlite`
+  - ⚠️ `api`（把 HTTP 接口当表查）**本轮不做**：① 表单是另一套字段；
+    ② 上游读接口**不回传** `api_url` 等字段，编辑不了
+- `group` 决定表单显示哪些字段：`relational` → 主机/端口/库名/账号/密码；`file`（sqlite）→ **只要文件路径**
 
-请求体：
+#### `POST /api/db-connections`
+新增一条。
+- 请求体：`{ "name", "type", "database", "host"?, "port"?, "username"?, "max_rows"?, "password"? }`
+- **必填字段按类型**：
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `name` | string | 必填。中英文/数字/下划线/连字符，1–64 位 |
-| `type` | string | 必填。`mysql` / `postgresql` / `sqlserver` / `oracle`（**不支持 sqlite**） |
-| `host` | string | 必填。IP 或主机名（不含空白与路径分隔符） |
-| `port` | int? | 缺省按类型补：3306 / 5432 / 1433 / 1521；1–65535 |
-| `database` | string | 必填。库名（Oracle 填服务名） |
-| `username` | string | 必填。请填 SELECT-only 账号 |
-| `max_rows` | int? | 1–1000，默认 200 |
-| `read_only` | bool? | **服务端恒置 true**，传什么都一样 |
-| `password` | string? | **三态**：不发=保持原值；`""`=清除；有值=加密覆盖（首次保存必填） |
+| 类型组 | 必填 |
+|---|---|
+| 关系库 | `name` / `type` / `host` / `database` / `username`，且**首次必须给 `password`** |
+| `sqlite` | `name` / `type` / `database`（= 数据库文件路径）；`host`/`port`/`username` 一律被清空 |
 
-- `200`：`{ "ok": true, "connection": { ...同上单条字段... } }`
-- `400` 校验失败（含「首次保存必须填写密码」）；`409` 名称被占用；`502` 未配置 `HERMESMCP_DB_KEY`
-- 密码加密格式与 hermes-mcp **逐字一致**：`Fernet(base64(sha256(HERMESMCP_DB_KEY)))`，写入 `password_cipher` 列——两侧 key 不同则问数端 `InvalidToken`，只能重填
+- `200`：`{ "ok": true, "name": "..." }`
+- `400` 校验失败（**含类型不在白名单**——上游不校验类型、非法值会照收，所以由我们拦）；
+  `409` 重名；`502` 连不上问数服务
+
+#### `PUT /api/db-connections/{name}`
+覆盖一条**已存在**的。
+- Path：`name` 是这条的身份（body 里不用再给）
+- 请求体：同 `POST`，去掉 `name`
+- `200`：`{ "ok": true, "name": "..." }`；`400` / **`404` 不存在** / `502`
+- ⚠️ **不支持改名**：上游按 `name` upsert，所谓"改名"实际是"删旧的 + 建新的"、
+  中途失败会留下空档。要改名就删了重建
+
+#### `DELETE /api/db-connections/{name}`
+- `200`：`{ "ok": true, "name": "..." }`；**`404` 不存在**；`502`
+- ⚠️ **立即生效、不可恢复**（问数服务侧没有回收站）
+
+**密码三态**（与模型配置的 `api_key` 一致）：不发 `password` = 保持原值 ｜ `""` = 清除 ｜ 非空 = 换新。
+> 与 Hermes 渠道的 `env` 语义**相反**（那边空串是"跳过"，不清除）。
 
 ### 6.2 MCP 服务配置（代理 Hermes dashboard）
 

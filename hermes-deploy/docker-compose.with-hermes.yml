@@ -71,10 +71,12 @@ services:
       # 这一条覆盖 .env 里的同名值，两份 stack 因此可以各用各的 .env/.env.mcp。
       HERMES_BASE: "http://gateway:9119"
       HIDDEN_DB_PATH: /data/hidden_models.db
-      HERMESMCP_DB_CONFIG: /shared/db_connections.db
+      # 控制台访问问数服务的**唯一出口**（2026-10-20 改）。
+      # 控制台已不再挂 /shared、也不再读 HERMESMCP_DB_KEY（key 仍会经 env_file 传进来，
+      # 那是 compose 插值和 mcp 服务要用的，控制台不读）。
+      HERMESMCP_URL: "http://hermes-mcp:9123/mcp"
     volumes:
       - console-data:/data
-      - ./shared/sqlite:/shared
     networks: [agentnet]
 
   # ── 问数 MCP 服务 ────────────────────────────────────────────────────

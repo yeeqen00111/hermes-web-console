@@ -144,25 +144,28 @@ docker compose -f docker-compose.mcp.yml up -d --build
 - 两者模板一致（见 `.env.example`），差异只在 `HERMES_BASE`——**改共享值（密码 / key）时两个文件都要改**。
 - 机制：compose 的 `${...}` 插值读同目录 `.env`；容器里拿到哪些变量由各服务的 `env_file:` 决定。别手动 `--env-file`。
 
-必填键：`HERMES_USER` / `HERMES_PASS`（dashboard basic + 控制台共用一组）、`HERMESMCP_DB_KEY`（共享注册表加密 key，**两侧必须一致**）。生产建议新生成 key，不要沿用开发期那把。
+必填键：`HERMES_USER` / `HERMES_PASS`（dashboard basic + 控制台共用一组）、`HERMESMCP_DB_KEY`（**只有 hermes-mcp 用**：数据源密码的加密 key）。生产建议新生成 key，不要沿用开发期那把。
 
-### 10.3 共享 SQLite（控制台 ↔ hermes-mcp 的唯一通道）
+`HERMESMCP_URL`（控制台连问数服务的地址）**不用填**——三份 compose 的 `environment:` 里已按服务名给死 `http://hermes-mcp:9123/mcp`（`environment` 覆盖 `env_file`）。
+
+### 10.3 控制台 ↔ hermes-mcp：走 MCP（**2026-10-20 改**）
 
 ```
-console     ──写──▶  /shared/db_connections.db ◀──读──  hermes-mcp
-                （挂同一个宿主目录：Linux 是 ./shared/sqlite；Windows 是 D:\WSL\docker\Volumes\hermes-shared）
+console ──MCP(streamable HTTP)──▶ http://hermes-mcp:9123/mcp ──▶ 数据源
+                                                    （hermes-mcp 是数据的唯一主人）
 ```
 
-- 控制台加密写入、hermes-mcp 解密读出；**没有网络调用**，因此两侧同机同文件是硬条件。
-- 挂**目录**不挂单文件（SQLite 的 `-wal`/`-shm` 要同目录）。
-- 谁先启动谁建表；控制台里「数据库配置」保存的那条，就是问数端要用的。
+- **旧的"共读共享 SQLite"通道已废弃**：那要求两端逐字对齐表结构与 Fernet 格式，任一侧改了另一侧就静默坏掉（症状：密码 `InvalidToken`，只能重填）。现在控制台只通过 **MCP 工具**访问，**不碰任何文件**。
+- `./shared/sqlite`（Windows 上是 `D:\WSL\docker\Volumes\hermes-shared`）现在**只有 hermes-mcp 挂**；控制台不再挂它，也不再读 `HERMESMCP_DB_KEY`。
+- 地址必须是**服务名** `hermes-mcp`——同 network 内由 Docker DNS 解析。`localhost` 是控制台容器自己；宿主 IP 也不通（mcp 没往宿主映射端口）。
+- 挂**目录**不挂单文件（SQLite 的 `-wal`/`-shm` 要同目录）——这条现在只对 hermes-mcp 自己有约束。
 
 ### 10.4 问数上线四步
 
 1. `up -d --build` 起 stack（见 10.1）。
 2. 打开控制台 → **问数 → MCP 配置 → ＋ 添加 MCP 服务**：名称 `sql-coustm`（与 `.env` 的 `MCP_SERVER_NAME` 一致），地址 **`http://hermes-mcp:9123/mcp`**。
    - host 必须是 **service 名**——同 network 内 Docker DNS 解析；`localhost` 是 Hermes 容器自己，宿主 IP 也不通（mcp 没往宿主映射端口）。
-3. **问数 → 数据库配置**：填一条数据源（建议先新建库、别沿用开发期那个旧注册表）。
+3. **问数 → 数据源 → ＋ 添加数据源**：加一条（先选类型，字段跟着类型变；`sqlite` 只填文件路径）。
 4. 对话里直接问数。
 
 ### 10.5 构建网络（国内环境）
@@ -175,7 +178,8 @@ console     ──写──▶  /shared/db_connections.db ◀──读──  he
 
 ### 10.6 已知坑（都踩过）
 
-- **控制台镜像要装 `cryptography`**：`backend/requirements.txt` 里已列（缺了会让"保存数据源"报 500 `ModuleNotFoundError`）。改依赖后必须 `up -d --build` 重建镜像。
+- **控制台镜像要装 `mcp`（MCP SDK）**：`backend/requirements.txt` 里已列。缺了**容器启动就崩**（`dbconn` → `mcp_client` → `import mcp` 抛 `ModuleNotFoundError`），而且**本地开发看不出来**（conda py310 里早就装了）。改依赖后必须 `up -d --build` 重建镜像。
+- **控制台启动会慢一点**：MCP SDK 的 import 链不轻（空闲机亚秒级，机器负载高时能到数秒）。
 - **hermes-mcp 的镜像要显式装 `uvicorn`**（`run_http.py` 要它，`pyproject.toml` 没声明）——已在 `hermes-mcp/Dockerfile` 补齐。
 - **`python:3.10-slim` 没有 `curl`**：两个健康检查都用纯 Python socket 探测，别改回 curl。
 - **两个 stack 别同时起**：共用 `console-data` 卷（项目名相同）。一个一个来。
